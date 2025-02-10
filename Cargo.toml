@@ -1,0 +1,10 @@
+[package]
+name = "SignalKit.rs"
+version = "0.1.0"
+edition = "2025"
+
+[dependencies]
+rustfft = "6.2.0"
+num-complex = "0.4"
+
+
