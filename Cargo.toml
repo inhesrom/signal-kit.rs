@@ -1,10 +1,10 @@
 [package]
-name = "SignalKit.rs"
+name = "SignalKit_rs"
 version = "0.1.0"
-edition = "2025"
+edition = "2021"
 
 [dependencies]
 rustfft = "6.2.0"
 num-complex = "0.4"
-
+bitvec = "1.0.1"
 
