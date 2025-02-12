@@ -71,3 +71,4 @@ impl Default for RandomBitGenerator {
     fn default() -> Self {
         Self::new()
     }
+}
