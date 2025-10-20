@@ -1,5 +1,8 @@
+#![allow(dead_code)]
+
 use rand::{RngCore, SeedableRng};
 use rand::rngs::StdRng;
+use rustfft::num_traits::ToPrimitive;
 
 pub struct BitGenerator {
     rng: StdRng,
@@ -8,7 +11,7 @@ pub struct BitGenerator {
 }
 
 impl BitGenerator {
-    pub fn from_seed(seed: u64) -> Self {
+    pub fn new_from_seed(seed: u64) -> Self {
         Self {
             rng: StdRng::seed_from_u64(seed),
             buffer: 0,
@@ -16,7 +19,7 @@ impl BitGenerator {
         }
     }
 
-    pub fn new() -> Self {
+    pub fn new_from_entropy() -> Self {
         Self {
             rng: StdRng::from_entropy(),
             buffer: 0,
@@ -46,7 +49,7 @@ impl BitGenerator {
         self.buffer >>= num_bits;
         self.bits_remaining -= num_bits;
 
-        result
+        return result;
     }
 
     // Convenience methods for common cases
@@ -60,5 +63,30 @@ impl BitGenerator {
 
     pub fn next_3_bits(&mut self) -> u8 {
         self.next_bits(3) as u8
+    }
+
+    //For debug printing bit values to console
+    pub fn print_n(&self, byte: &u8, num_bits: &u8) {
+        let width: usize = num_bits.to_usize().expect("Conversion from u8 to usize failed");
+        println!("{:width$b}", byte);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::random_bit_generator::BitGenerator;
+
+    #[test]
+    fn gen_bits_from_entropy() {
+        let mut entropy_bit_generator = BitGenerator::new_from_entropy();
+        let five_bits: u8 = entropy_bit_generator.next_bits(5).try_into().unwrap();
+        entropy_bit_generator.print_n(&five_bits, &5u8);
+    }
+
+    #[test]
+    fn gen_2bits_from_seed() {
+        let mut seeded_bit_generator = BitGenerator::new_from_seed(0);
+        let two_bits = seeded_bit_generator.next_2_bits();
+        seeded_bit_generator.print_n(&two_bits, &2u8);
     }
 }
