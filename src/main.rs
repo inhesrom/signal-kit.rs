@@ -2,7 +2,7 @@ mod random_bit_generator;
 mod symbol_mapper;
 
 use random_bit_generator::BitGenerator;
-use symbol_mapper::Mapper;
+use symbol_mapper::MapDemap;
 
 fn main()
 {
