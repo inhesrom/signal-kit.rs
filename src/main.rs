@@ -1,8 +1,10 @@
 mod random_bit_generator;
 mod symbol_mapper;
+mod rrc_filter;
 
 use random_bit_generator::BitGenerator;
 use symbol_mapper::MapDemap;
+use rrc_filter::RRCFilter;
 
 use num_complex::Complex32;
 
