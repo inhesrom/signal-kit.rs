@@ -58,6 +58,11 @@ where
         self.data.push(value);
     }
 
+    /// Adds an element to the end of the vector (alias for push_back)
+    pub fn push(&mut self, value: T) {
+        self.data.push(value);
+    }
+
     /// Appends another VectorSimd to this one
     pub fn append(&mut self, other: &VectorSimd<T>) {
         self.data.extend_from_slice(&other.data);
@@ -244,7 +249,6 @@ impl VectorSimd<f32> {
 
         let mut result = Vec::with_capacity(self.size());
         let chunks = self.size() / 8;
-        let remainder = self.size() % 8;
 
         // Process 8 elements at a time using SIMD
         for i in 0..chunks {
@@ -295,7 +299,6 @@ impl VectorSimd<f32> {
         let mut result = vec![0.0f32; output_size];
 
         let simd_chunks = output_size / 8;
-        let remainder = output_size % 8;
 
         // Process 8 output samples at a time
         for chunk_idx in 0..simd_chunks {
@@ -337,7 +340,6 @@ impl VectorSimd<f64> {
 
         let mut result = Vec::with_capacity(self.size());
         let chunks = self.size() / 4;
-        let remainder = self.size() % 4;
 
         // Process 4 elements at a time using SIMD
         for i in 0..chunks {
@@ -505,5 +507,201 @@ mod tests {
         assert_eq!(result[0], 2.0);
         // Second element should be signal[1] + signal[3] = 1 + 3 = 4
         assert_eq!(result[1], 4.0);
+    }
+
+    // Tests converted from example.rs
+
+    #[test]
+    fn test_push_method() {
+        let mut v = VectorSimd::<f32>::new();
+        v.push(1.0);
+        v.push(2.0);
+        v.push(3.0);
+
+        assert_eq!(v.len(), 3);
+        assert_eq!(v[0], 1.0);
+        assert_eq!(v[1], 2.0);
+        assert_eq!(v[2], 3.0);
+    }
+
+    #[test]
+    fn test_basic_f32_operations() {
+        // Example 1 from example.rs
+        let a = VectorSimd::from_vec(vec![1.0f32, 2.0, 3.0, 4.0]);
+        let b = VectorSimd::from_vec(vec![5.0f32, 6.0, 7.0, 8.0]);
+
+        let sum = &a + &b;
+        assert_eq!(sum[0], 6.0);
+        assert_eq!(sum[1], 8.0);
+        assert_eq!(sum[2], 10.0);
+        assert_eq!(sum[3], 12.0);
+
+        let product = &a * &b;
+        assert_eq!(product[0], 5.0);
+        assert_eq!(product[1], 12.0);
+        assert_eq!(product[2], 21.0);
+        assert_eq!(product[3], 32.0);
+
+        let scalar_add = &a + 10.0;
+        assert_eq!(scalar_add[0], 11.0);
+        assert_eq!(scalar_add[1], 12.0);
+        assert_eq!(scalar_add[2], 13.0);
+        assert_eq!(scalar_add[3], 14.0);
+    }
+
+    #[test]
+    fn test_complex_multiplication() {
+        // Example 2 from example.rs
+        let c1 = VectorSimd::from_vec(vec![
+            Complex::new(2.0f32, 3.0),
+            Complex::new(4.0, 5.0),
+        ]);
+        let c2 = VectorSimd::from_vec(vec![
+            Complex::new(4.0f32, 5.0),
+            Complex::new(6.0, 7.0),
+        ]);
+
+        let c_product = &c1 * &c2;
+
+        // (2+3i) * (4+5i) = 8 + 10i + 12i + 15i² = 8 + 22i - 15 = -7 + 22i
+        assert_eq!(c_product[0].re, -7.0);
+        assert_eq!(c_product[0].im, 22.0);
+
+        // (4+5i) * (6+7i) = 24 + 28i + 30i + 35i² = 24 + 58i - 35 = -11 + 58i
+        assert_eq!(c_product[1].re, -11.0);
+        assert_eq!(c_product[1].im, 58.0);
+    }
+
+    #[test]
+    fn test_convolution_detailed() {
+        // Example 3 from example.rs
+        let signal: Vec<f32> = (0..1024).map(|x| x as f32).collect();
+        let signal_vec = VectorSimd::from_vec(signal);
+        let kernel = VectorSimd::from_vec(vec![1.0f32, 0.0, 1.0]);
+
+        let result = signal_vec.convolve(&kernel);
+
+        assert_eq!(signal_vec.len(), 1024);
+        assert_eq!(kernel.len(), 3);
+        assert_eq!(result.len(), 1024 - 3 + 1);
+
+        // Verify first few results
+        // result[i] = signal[i]*1.0 + signal[i+1]*0.0 + signal[i+2]*1.0
+        //           = signal[i] + signal[i+2]
+        assert_eq!(result[0], 0.0 + 2.0);  // 2.0
+        assert_eq!(result[1], 1.0 + 3.0);  // 4.0
+        assert_eq!(result[2], 2.0 + 4.0);  // 6.0
+        assert_eq!(result[3], 3.0 + 5.0);  // 8.0
+        assert_eq!(result[4], 4.0 + 6.0);  // 10.0
+    }
+
+    #[test]
+    fn test_append_operation() {
+        // Example 5 from example.rs
+        let mut v1 = VectorSimd::from_vec(vec![0.0f32, 1.0, 2.0, 3.0]);
+        let v2 = VectorSimd::from_vec(vec![4.0f32, 5.0, 6.0, 7.0]);
+
+        v1.append(&v2);
+
+        assert_eq!(v1.len(), 8);
+        assert_eq!(v1[0], 0.0);
+        assert_eq!(v1[3], 3.0);
+        assert_eq!(v1[4], 4.0);
+        assert_eq!(v1[7], 7.0);
+    }
+
+    #[test]
+    fn test_in_place_operations() {
+        // Example 6 from example.rs
+        let mut v = VectorSimd::from_vec(vec![5.0f32, 15.0, 25.0]);
+
+        v /= 5.0;
+
+        assert_eq!(v[0], 1.0);
+        assert_eq!(v[1], 3.0);
+        assert_eq!(v[2], 5.0);
+    }
+
+    #[test]
+    fn test_simd_multiplication_correctness() {
+        // Example 4 from example.rs - verify SIMD multiplication matches standard
+        let size = 1000;
+        let data_a: Vec<f32> = (0..size).map(|i| (i % 100) as f32 / 100.0).collect();
+        let data_b: Vec<f32> = (0..size).map(|i| ((i * 7) % 100) as f32 / 100.0).collect();
+
+        let vec_a = VectorSimd::from_vec(data_a.clone());
+        let vec_b = VectorSimd::from_vec(data_b.clone());
+
+        let result_operator = &vec_a * &vec_b;
+        let result_simd = vec_a.mul_simd(&vec_b);
+
+        // Verify both methods produce same results
+        for i in 0..size {
+            let expected = data_a[i] * data_b[i];
+            assert!((result_operator[i] - expected).abs() < 1e-6);
+            assert!((result_simd[i] - expected).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn test_complex_mul_complex_method() {
+        let c1 = VectorSimd::from_vec(vec![
+            Complex::new(2.0f32, 3.0),
+            Complex::new(1.0, 1.0),
+        ]);
+        let c2 = VectorSimd::from_vec(vec![
+            Complex::new(4.0f32, 5.0),
+            Complex::new(2.0, 3.0),
+        ]);
+
+        let result = c1.mul_complex(&c2);
+
+        // (2+3i) * (4+5i) = -7 + 22i
+        assert_eq!(result[0].re, -7.0);
+        assert_eq!(result[0].im, 22.0);
+
+        // (1+1i) * (2+3i) = 2 + 3i + 2i + 3i² = 2 + 5i - 3 = -1 + 5i
+        assert_eq!(result[1].re, -1.0);
+        assert_eq!(result[1].im, 5.0);
+    }
+
+    #[test]
+    fn test_subtraction() {
+        let a = VectorSimd::from_vec(vec![10.0f32, 20.0, 30.0]);
+        let b = VectorSimd::from_vec(vec![1.0f32, 2.0, 3.0]);
+
+        let result = &a - &b;
+
+        assert_eq!(result[0], 9.0);
+        assert_eq!(result[1], 18.0);
+        assert_eq!(result[2], 27.0);
+    }
+
+    #[test]
+    fn test_division() {
+        let a = VectorSimd::from_vec(vec![10.0f32, 20.0, 30.0]);
+        let b = VectorSimd::from_vec(vec![2.0f32, 4.0, 5.0]);
+
+        let result = &a / &b;
+
+        assert_eq!(result[0], 5.0);
+        assert_eq!(result[1], 5.0);
+        assert_eq!(result[2], 6.0);
+    }
+
+    #[test]
+    fn test_with_capacity() {
+        let v = VectorSimd::<f32>::with_capacity(100);
+        assert_eq!(v.len(), 0);
+        assert!(v.is_empty());
+    }
+
+    #[test]
+    fn test_with_value() {
+        let v = VectorSimd::with_value(5, 3.14f32);
+        assert_eq!(v.len(), 5);
+        for i in 0..5 {
+            assert_eq!(v[i], 3.14);
+        }
     }
 }
