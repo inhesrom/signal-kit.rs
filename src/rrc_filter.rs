@@ -2,25 +2,21 @@ use num_traits::Float;
 
 pub struct RRCFilter<T> {
     num_filter_taps: usize,
-    sample_rate: T,
-    symbol_rate: T,
     beta: T,
-    symbol_period: T,
+    sps: T, //samples per symbol
     scale: T,
 }
 
 impl<T: Float> RRCFilter<T> {
     pub fn new(num_filter_taps: usize, sample_rate: T, symbol_rate: T, beta: T) -> Self {
         let one = T::one();
-        let symbol_period = one / symbol_rate;
+        let sps = sample_rate / symbol_rate;
         let scale = one / sample_rate;
 
         RRCFilter {
             num_filter_taps,
-            sample_rate,
-            symbol_rate,
             beta,
-            symbol_period,
+            sps,
             scale
         }
     }
@@ -40,17 +36,17 @@ impl<T: Float> RRCFilter<T> {
             let t = t * self.scale;
 
             if t == zero {
-                (one + self.beta * (four / pi - one)) / self.symbol_period
+                (one + self.beta * (four / pi - one)) / self.sps
             }
-            else if t.abs() == self.symbol_period / (four * self.beta) {
+            else if t.abs() == self.sps / (four * self.beta) {
                 (self.beta / two.sqrt()) *
                 ((one + two / pi) * (pi / (four * self.beta)).sin() +
-                 (one - two / pi) * (pi / (four * self.beta)).cos()) / self.symbol_period
+                 (one - two / pi) * (pi / (four * self.beta)).cos()) / self.sps
             }
             else {
-                ((pi * t * (one - self.beta) / self.symbol_period).sin() +
-                 four * self.beta * t * (pi * t * (one + self.beta) / self.symbol_period).cos() / self.symbol_period) /
-                (pi * t * (one - (four * self.beta * t / self.symbol_period) * (four * self.beta * t / self.symbol_period)) / self.symbol_period)
+                ((pi * t * (one - self.beta) / self.sps).sin() +
+                 four * self.beta * t * (pi * t * (one + self.beta) / self.sps).cos() / self.sps) /
+                (pi * t * (one - (four * self.beta * t / self.sps) * (four * self.beta * t / self.sps)) / self.sps)
             }
         }).collect();
 
@@ -63,9 +59,19 @@ impl<T: Float> RRCFilter<T> {
 #[cfg(test)]
 mod tests {
     use crate::rrc_filter::RRCFilter;
+    use num_complex::{Complex32, Complex64};
+
     #[test]
     fn test_vec_f32() {
-        let filter32 = RRCFilter::<f32>::new(101, 1e6_f32, 100e3_f32, 0.35_f32);
+        let filter32 = RRCFilter::<Complex32>::new(101, 1e6_f32, 100e3_f32, 0.35_f32);
         let taps32: Vec<f32> = filter32.build_filter();
+        println!("Filter taps are: {}", taps32.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(", "));
+    }
+
+    #[test]
+    fn test_vec_f64() {
+        let filter64 = RRCFilter::<f64>::new(51, 1e6_f64, 500e3_f64, 0.25_f64);
+        let taps64: Vec<f64> = filter64.build_filter();
+        println!("Filter taps are: {}", taps64.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(", "));
     }
 }
