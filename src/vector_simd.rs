@@ -2,6 +2,7 @@
 
 use num_complex::Complex;
 use std::ops::{Add, Sub, Mul, Div, Index, IndexMut, AddAssign, SubAssign, MulAssign, DivAssign};
+use bytemuck::{cast_slice, cast_slice_mut, Pod};
 
 // ============================================================================
 // SIMD Configuration Module - Change these type aliases to switch register width
@@ -353,7 +354,7 @@ pub enum Operation {
 
 impl<T> VectorSimd<T>
 where
-    T: Copy + Default,
+    T: Copy + Default + Pod,
 {
     /// Generic SIMD batch processor for vector-vector operations
     fn process_simd_batches<B>(
@@ -363,7 +364,7 @@ where
         scalar_op: impl Fn(T, T) -> T,
     ) -> VectorSimd<T>
     where
-        B: SimdBatch<Scalar = T>,
+        B: SimdBatch<Scalar = T> + Pod,
     {
         assert_eq!(
             self.len(),
@@ -375,13 +376,15 @@ where
         let lanes = B::LANES;
         let simd_end = (self.len() / lanes) * lanes;
 
-        // Process SIMD batches
-        for i in (0..simd_end).step_by(lanes) {
-            let a = B::load(&self.data[i..]);
-            let b = B::load(&other.data[i..]);
-            let c = batch_op(a, b);
-            c.store(&mut result[i..]);
-        }
+        // Process SIMD batches using zero-copy cast_slice
+        let a_simd: &[B] = cast_slice(&self.data[..simd_end]);
+        let b_simd: &[B] = cast_slice(&other.data[..simd_end]);
+        let result_simd: &mut [B] = cast_slice_mut(&mut result[..simd_end]);
+
+        // Use iterator-based approach for better optimization
+        result_simd.iter_mut()
+            .zip(a_simd.iter().zip(b_simd.iter()))
+            .for_each(|(r, (a, b))| *r = batch_op(*a, *b));
 
         // Process remainder with scalar operations
         for i in simd_end..self.len() {
@@ -399,19 +402,21 @@ where
         scalar_op: impl Fn(T, T) -> T,
     ) -> VectorSimd<T>
     where
-        B: SimdBatch<Scalar = T>,
+        B: SimdBatch<Scalar = T> + Pod,
     {
         let mut result = vec![T::default(); self.len()];
         let lanes = B::LANES;
         let simd_end = (self.len() / lanes) * lanes;
         let scalar_batch = B::splat(scalar);
 
-        // Process SIMD batches
-        for i in (0..simd_end).step_by(lanes) {
-            let a = B::load(&self.data[i..]);
-            let c = batch_op(a, scalar_batch);
-            c.store(&mut result[i..]);
-        }
+        // Process SIMD batches using zero-copy cast_slice
+        let a_simd: &[B] = cast_slice(&self.data[..simd_end]);
+        let result_simd: &mut [B] = cast_slice_mut(&mut result[..simd_end]);
+
+        // Use iterator-based approach for better optimization
+        result_simd.iter_mut()
+            .zip(a_simd.iter())
+            .for_each(|(r, a)| *r = batch_op(*a, scalar_batch));
 
         // Process remainder
         for i in simd_end..self.len() {
@@ -429,18 +434,18 @@ where
         scalar_op: impl Fn(T, T) -> T,
     )
     where
-        B: SimdBatch<Scalar = T>,
+        B: SimdBatch<Scalar = T> + Pod,
     {
         let lanes = B::LANES;
         let simd_end = (self.len() / lanes) * lanes;
         let scalar_batch = B::splat(scalar);
 
-        // Process SIMD batches
-        for i in (0..simd_end).step_by(lanes) {
-            let a = B::load(&self.data[i..]);
-            let c = batch_op(a, scalar_batch);
-            c.store(&mut self.data[i..]);
-        }
+        // Process SIMD batches using zero-copy cast_slice
+        let data_simd: &mut [B] = cast_slice_mut(&mut self.data[..simd_end]);
+
+        // Use iterator-based approach for better optimization
+        data_simd.iter_mut()
+            .for_each(|d| *d = batch_op(*d, scalar_batch));
 
         // Process remainder
         for i in simd_end..self.len() {
@@ -739,12 +744,14 @@ impl VectorSimd<f32> {
         let lanes = F32Batch::LANES;
         let simd_end = (self.len() / lanes) * lanes;
 
-        // Process SIMD batches
-        for i in (0..simd_end).step_by(lanes) {
-            let a = F32Batch::load(&self.data[i..]);
-            let c = a.abs();
-            c.store(&mut result[i..]);
-        }
+        // Process SIMD batches using zero-copy cast_slice
+        let a_simd: &[F32Batch] = cast_slice(&self.data[..simd_end]);
+        let result_simd: &mut [F32Batch] = cast_slice_mut(&mut result[..simd_end]);
+
+        // Use iterator-based approach for better optimization
+        result_simd.iter_mut()
+            .zip(a_simd.iter())
+            .for_each(|(r, a)| *r = a.abs());
 
         // Process remainder
         for i in simd_end..self.len() {
@@ -793,17 +800,16 @@ impl VectorSimd<f32> {
             let base_idx = chunk_idx * LANES;
             let mut accum = F32Batch::zero();
 
-            // For each kernel tap
+            // For each kernel tap (using load since base_idx + k may not be aligned)
             for k in 0..kernel.size() {
-                let signal_slice = &self.data[base_idx + k..base_idx + k + LANES];
-                let sig = F32Batch::load(signal_slice);
+                let sig = F32Batch::load(&self.data[base_idx + k..]);
                 let kern = F32Batch::splat(kernel.data[k]);
                 accum = SimdBatch::add(accum, SimdBatch::mul(sig, kern));
             }
 
-            let mut accum_array = [0.0f32; LANES];
-            accum.store(&mut accum_array);
-            result[base_idx..base_idx + LANES].copy_from_slice(&accum_array);
+            // Use cast_slice_mut for zero-copy store (base_idx is always aligned to LANES)
+            let result_simd: &mut [F32Batch] = cast_slice_mut(&mut result[base_idx..base_idx + LANES]);
+            result_simd[0] = accum;
         }
 
         // Handle remaining elements
