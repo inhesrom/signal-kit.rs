@@ -26,6 +26,20 @@ mod simd_config {
 // ============================================================================
 
 /// Trait for SIMD batch operations, allowing generic code over different register widths
+///
+/// # Memory Alignment
+///
+/// All load/store operations use **unaligned** instructions, which work correctly
+/// regardless of memory alignment. On modern CPUs (Intel Nehalem+ 2008, AMD Bulldozer+ 2011),
+/// unaligned loads/stores have **zero performance penalty** for aligned data.
+///
+/// This design choice provides:
+/// - **Safety**: Works with any slice, no alignment requirements
+/// - **Performance**: Equal to aligned loads on modern hardware
+/// - **Simplicity**: No need to track or enforce alignment
+///
+/// The only remaining penalty is cache-line splits (when data crosses cache boundaries),
+/// which is unavoidable and handled automatically by the CPU.
 pub trait SimdBatch: Sized + Copy {
     type Scalar: Copy;
 
@@ -38,17 +52,11 @@ pub trait SimdBatch: Sized + Copy {
     /// Create a batch with all lanes set to the same value (splat)
     fn splat(value: Self::Scalar) -> Self;
 
-    /// Load from aligned memory
-    fn load_aligned(ptr: &[Self::Scalar]) -> Self;
+    /// Load LANES elements from a slice (works with any alignment)
+    fn load(ptr: &[Self::Scalar]) -> Self;
 
-    /// Load from unaligned memory
-    fn load_unaligned(ptr: &[Self::Scalar]) -> Self;
-
-    /// Store to aligned memory
-    fn store_aligned(self, ptr: &mut [Self::Scalar]);
-
-    /// Store to unaligned memory
-    fn store_unaligned(self, ptr: &mut [Self::Scalar]);
+    /// Store LANES elements to a slice (works with any alignment)
+    fn store(self, ptr: &mut [Self::Scalar]);
 
     /// Addition
     fn add(self, rhs: Self) -> Self;
@@ -88,27 +96,16 @@ impl SimdBatch for wide::f32x4 {
     }
 
     #[inline]
-    fn load_aligned(ptr: &[f32]) -> Self {
+    fn load(ptr: &[f32]) -> Self {
         assert!(ptr.len() >= 4, "Need at least 4 elements for f32x4");
         Self::from(&ptr[0..4])
     }
 
     #[inline]
-    fn load_unaligned(ptr: &[f32]) -> Self {
-        assert!(ptr.len() >= 4, "Need at least 4 elements for f32x4");
-        Self::from(&ptr[0..4])
-    }
-
-    #[inline]
-    fn store_aligned(self, ptr: &mut [f32]) {
+    fn store(self, ptr: &mut [f32]) {
         assert!(ptr.len() >= 4, "Need at least 4 elements for f32x4");
         let arr = self.to_array();
         ptr[0..4].copy_from_slice(&arr);
-    }
-
-    #[inline]
-    fn store_unaligned(self, ptr: &mut [f32]) {
-        self.store_aligned(ptr);
     }
 
     #[inline]
@@ -162,27 +159,16 @@ impl SimdBatch for wide::f64x2 {
     }
 
     #[inline]
-    fn load_aligned(ptr: &[f64]) -> Self {
+    fn load(ptr: &[f64]) -> Self {
         assert!(ptr.len() >= 2, "Need at least 2 elements for f64x2");
         Self::from([ptr[0], ptr[1]])
     }
 
     #[inline]
-    fn load_unaligned(ptr: &[f64]) -> Self {
-        assert!(ptr.len() >= 2, "Need at least 2 elements for f64x2");
-        Self::from([ptr[0], ptr[1]])
-    }
-
-    #[inline]
-    fn store_aligned(self, ptr: &mut [f64]) {
+    fn store(self, ptr: &mut [f64]) {
         assert!(ptr.len() >= 2, "Need at least 2 elements for f64x2");
         let arr = self.to_array();
         ptr[0..2].copy_from_slice(&arr);
-    }
-
-    #[inline]
-    fn store_unaligned(self, ptr: &mut [f64]) {
-        self.store_aligned(ptr);
     }
 
     #[inline]
@@ -391,10 +377,10 @@ where
 
         // Process SIMD batches
         for i in (0..simd_end).step_by(lanes) {
-            let a = B::load_aligned(&self.data[i..]);
-            let b = B::load_aligned(&other.data[i..]);
+            let a = B::load(&self.data[i..]);
+            let b = B::load(&other.data[i..]);
             let c = batch_op(a, b);
-            c.store_aligned(&mut result[i..]);
+            c.store(&mut result[i..]);
         }
 
         // Process remainder with scalar operations
@@ -422,9 +408,9 @@ where
 
         // Process SIMD batches
         for i in (0..simd_end).step_by(lanes) {
-            let a = B::load_aligned(&self.data[i..]);
+            let a = B::load(&self.data[i..]);
             let c = batch_op(a, scalar_batch);
-            c.store_aligned(&mut result[i..]);
+            c.store(&mut result[i..]);
         }
 
         // Process remainder
@@ -451,9 +437,9 @@ where
 
         // Process SIMD batches
         for i in (0..simd_end).step_by(lanes) {
-            let a = B::load_aligned(&self.data[i..]);
+            let a = B::load(&self.data[i..]);
             let c = batch_op(a, scalar_batch);
-            c.store_aligned(&mut self.data[i..]);
+            c.store(&mut self.data[i..]);
         }
 
         // Process remainder
@@ -755,9 +741,9 @@ impl VectorSimd<f32> {
 
         // Process SIMD batches
         for i in (0..simd_end).step_by(lanes) {
-            let a = F32Batch::load_aligned(&self.data[i..]);
+            let a = F32Batch::load(&self.data[i..]);
             let c = a.abs();
-            c.store_aligned(&mut result[i..]);
+            c.store(&mut result[i..]);
         }
 
         // Process remainder
@@ -810,13 +796,13 @@ impl VectorSimd<f32> {
             // For each kernel tap
             for k in 0..kernel.size() {
                 let signal_slice = &self.data[base_idx + k..base_idx + k + LANES];
-                let sig = F32Batch::load_aligned(signal_slice);
+                let sig = F32Batch::load(signal_slice);
                 let kern = F32Batch::splat(kernel.data[k]);
                 accum = SimdBatch::add(accum, SimdBatch::mul(sig, kern));
             }
 
             let mut accum_array = [0.0f32; LANES];
-            accum.store_aligned(&mut accum_array);
+            accum.store(&mut accum_array);
             result[base_idx..base_idx + LANES].copy_from_slice(&accum_array);
         }
 
