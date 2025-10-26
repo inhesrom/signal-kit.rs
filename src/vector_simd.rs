@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use num_complex::Complex;
 use std::ops::{Add, Sub, Mul, Div, Index, IndexMut, AddAssign, SubAssign, MulAssign, DivAssign};
 

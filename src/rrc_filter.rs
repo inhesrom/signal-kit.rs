@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use num_complex::{Complex, ComplexFloat};
 use num_traits::Float;
 
