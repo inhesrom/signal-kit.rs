@@ -372,7 +372,12 @@ where
             "Vector sizes must match for element-wise operations"
         );
 
-        let mut result = vec![T::default(); self.len()];
+        // Allocate without initialization for better performance
+        let mut result = Vec::with_capacity(self.len());
+        unsafe {
+            result.set_len(self.len());
+        }
+
         let lanes = B::LANES;
         let simd_end = (self.len() / lanes) * lanes;
 
@@ -404,7 +409,12 @@ where
     where
         B: SimdBatch<Scalar = T> + Pod,
     {
-        let mut result = vec![T::default(); self.len()];
+        // Allocate without initialization for better performance
+        let mut result = Vec::with_capacity(self.len());
+        unsafe {
+            result.set_len(self.len());
+        }
+
         let lanes = B::LANES;
         let simd_end = (self.len() / lanes) * lanes;
         let scalar_batch = B::splat(scalar);
@@ -740,7 +750,12 @@ impl VectorSimd<f32> {
     pub fn abs(&self) -> VectorSimd<f32> {
         use simd_config::F32Batch;
 
-        let mut result = vec![0.0f32; self.len()];
+        // Allocate without initialization for better performance
+        let mut result = Vec::with_capacity(self.len());
+        unsafe {
+            result.set_len(self.len());
+        }
+
         let lanes = F32Batch::LANES;
         let simd_end = (self.len() / lanes) * lanes;
 
@@ -1096,13 +1111,35 @@ mod tests {
     use std::time::Instant;
 
     /// Helper function to run scalar addition (non-SIMD baseline)
+    /// This uses iterator chains which LLVM will auto-vectorize
     fn scalar_add_f32(a: &[f32], b: &[f32]) -> Vec<f32> {
         a.iter().zip(b.iter()).map(|(x, y)| x + y).collect()
+    }
+
+    /// Non-vectorizable scalar addition (forced to prevent LLVM auto-vectorization)
+    #[inline(never)]
+    fn scalar_add_f32_no_vec(a: &[f32], b: &[f32]) -> Vec<f32> {
+        let mut result = Vec::with_capacity(a.len());
+        for i in 0..a.len() {
+            // black_box prevents the compiler from optimizing this loop
+            result.push(std::hint::black_box(a[i] + b[i]));
+        }
+        result
     }
 
     /// Helper function to run scalar multiplication (non-SIMD baseline)
     fn scalar_mul_f32(a: &[f32], b: &[f32]) -> Vec<f32> {
         a.iter().zip(b.iter()).map(|(x, y)| x * y).collect()
+    }
+
+    /// Non-vectorizable scalar multiplication
+    #[inline(never)]
+    fn scalar_mul_f32_no_vec(a: &[f32], b: &[f32]) -> Vec<f32> {
+        let mut result = Vec::with_capacity(a.len());
+        for i in 0..a.len() {
+            result.push(std::hint::black_box(a[i] * b[i]));
+        }
+        result
     }
 
     /// Helper function to run scalar convolution (non-SIMD baseline)
@@ -1404,6 +1441,96 @@ mod tests {
             println!("  Pure Scalar: {:?}", scalar_time);
             println!("  Speedup: {:.2}x (Note: Complex not yet SIMD-optimized)", speedup);
         }
+    }
+
+    #[test]
+    fn benchmark_detailed_comparison() {
+        println!("\n=== Detailed Performance Analysis ===");
+        println!("\nComparing SIMD vs Auto-Vectorized Scalar vs Non-Vectorized Scalar");
+        println!("Vector size: 100,000 elements\n");
+
+        const SIZE: usize = 100_000;
+        const ITERATIONS: usize = 10;
+
+        let data_a: Vec<f32> = (0..SIZE).map(|i| (i % 1000) as f32 / 1000.0).collect();
+        let data_b: Vec<f32> = (0..SIZE).map(|i| ((i * 7) % 1000) as f32 / 1000.0).collect();
+        let vec_a = VectorSimd::from_vec(data_a.clone());
+        let vec_b = VectorSimd::from_vec(data_b.clone());
+
+        // === ADDITION ===
+        println!("Addition (+):");
+
+        // SIMD
+        let start = Instant::now();
+        let mut simd_result = VectorSimd::new();
+        for _ in 0..ITERATIONS {
+            simd_result = &vec_a + &vec_b;
+        }
+        let simd_time = start.elapsed() / ITERATIONS as u32;
+        std::hint::black_box(&simd_result);
+
+        // Auto-vectorized scalar
+        let start = Instant::now();
+        let mut auto_result = Vec::new();
+        for _ in 0..ITERATIONS {
+            auto_result = scalar_add_f32(&data_a, &data_b);
+        }
+        let auto_time = start.elapsed() / ITERATIONS as u32;
+        std::hint::black_box(&auto_result);
+
+        // Non-vectorized scalar
+        let start = Instant::now();
+        let mut novec_result = Vec::new();
+        for _ in 0..ITERATIONS {
+            novec_result = scalar_add_f32_no_vec(&data_a, &data_b);
+        }
+        let novec_time = start.elapsed() / ITERATIONS as u32;
+        std::hint::black_box(&novec_result);
+
+        println!("  SIMD (explicit):        {:?}", simd_time);
+        println!("  Scalar (auto-vec):      {:?}", auto_time);
+        println!("  Scalar (no-vec):        {:?}", novec_time);
+        println!("  SIMD vs Auto-vec:       {:.2}x", auto_time.as_nanos() as f64 / simd_time.as_nanos() as f64);
+        println!("  SIMD vs No-vec:         {:.2}x", novec_time.as_nanos() as f64 / simd_time.as_nanos() as f64);
+
+        // === MULTIPLICATION ===
+        println!("\nMultiplication (*):");
+
+        let start = Instant::now();
+        let mut simd_result = VectorSimd::new();
+        for _ in 0..ITERATIONS {
+            simd_result = &vec_a * &vec_b;
+        }
+        let simd_time = start.elapsed() / ITERATIONS as u32;
+        std::hint::black_box(&simd_result);
+
+        let start = Instant::now();
+        let mut auto_result = Vec::new();
+        for _ in 0..ITERATIONS {
+            auto_result = scalar_mul_f32(&data_a, &data_b);
+        }
+        let auto_time = start.elapsed() / ITERATIONS as u32;
+        std::hint::black_box(&auto_result);
+
+        let start = Instant::now();
+        let mut novec_result = Vec::new();
+        for _ in 0..ITERATIONS {
+            novec_result = scalar_mul_f32_no_vec(&data_a, &data_b);
+        }
+        let novec_time = start.elapsed() / ITERATIONS as u32;
+        std::hint::black_box(&novec_result);
+
+        println!("  SIMD (explicit):        {:?}", simd_time);
+        println!("  Scalar (auto-vec):      {:?}", auto_time);
+        println!("  Scalar (no-vec):        {:?}", novec_time);
+        println!("  SIMD vs Auto-vec:       {:.2}x", auto_time.as_nanos() as f64 / simd_time.as_nanos() as f64);
+        println!("  SIMD vs No-vec:         {:.2}x", novec_time.as_nanos() as f64 / simd_time.as_nanos() as f64);
+
+        println!("\n════════════════════════════════════════════════");
+        println!("Key Insight:");
+        println!("If SIMD beats auto-vec but loses to no-vec, the issue is memory allocation.");
+        println!("If SIMD beats no-vec significantly, explicit SIMD is working correctly!");
+        println!("════════════════════════════════════════════════\n");
     }
 
     #[test]
