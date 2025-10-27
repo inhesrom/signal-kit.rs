@@ -35,8 +35,8 @@ where
 
     // Normalize to unit magnitude
     pub fn normalize(&mut self) -> ComplexVec<T> {
-        self.vector
-            .iter()
+        ComplexVec::from_vec(
+            self.vector.iter()
             .map(|c| {
                 let mag = c.abs();
                 if mag > T::zero() {
@@ -45,6 +45,7 @@ where
                     *c
                 }
             }).collect()
+        )
     }
 
     // In-place normalize to unit magnitude
