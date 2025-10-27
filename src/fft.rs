@@ -1,6 +1,7 @@
-#[warn(dead_code)]
+#![allow(dead_code)]
 
 mod fft {
+
     use std::fmt::Debug;
     use num_complex::{Complex, ComplexFloat};
     use num_traits::{Float, Signed, FromPrimitive};
@@ -19,16 +20,18 @@ mod fft {
 
 #[cfg(test)]
 mod tests {
-    use crate::cw::CW;
+    use crate::{complex_vec::ComplexVec, cw::CW};
     use crate::fft::fft;
     use num_complex::{Complex, ComplexFloat};
 
     #[test]
     fn test_fft() {
-        let mut cw_generator = CW::new(100e3, 500e3, 500_000);
-        let mut cw: Vec<Complex<f32>> = (0..1000).flat_map(|_| cw_generator.generate_block::<f32>()).collect();
-        let cw_fft = fft::fft::<f32>(&mut cw);
-        let mut c = Complex::<f32>::new(3.0, 2.0);
-        let r = c.norm();
+        let blocks: usize = 2;
+        let blocksize: usize = 500_000;
+        let mut cw_generator = CW::new(100e3, 500e3, blocksize);
+        let mut cw: Vec<Complex<f32>> = (0..blocks).flat_map(|_| cw_generator.generate_block::<f32>()).collect();
+        fft::fft::<f32>(&mut cw);
+        let mut cw_fft_cvec = ComplexVec::from_vec(cw);
+        let cw_fft_abs: Vec<f32> = cw_fft_cvec.abs();
     }
 }

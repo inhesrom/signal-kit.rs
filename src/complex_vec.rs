@@ -1,6 +1,6 @@
-use std::ops::{Add, Div, Mul, Sub};
+#![allow(dead_code)]
 
-use num_complex::Complex;
+use num_complex::{Complex, ComplexFloat};
 use num_traits::Float;
 
 pub struct ComplexVec<T> {
@@ -9,7 +9,7 @@ pub struct ComplexVec<T> {
 
 impl<T> ComplexVec<T>
 where
-    T: Float + Add + Sub + Mul + Div,
+    T: Float,
 {
     pub fn new() -> Self {
         ComplexVec {
@@ -30,7 +30,7 @@ where
 
     // Returns real vector of sqrt(r^2 + i^2)
     pub fn abs(&mut self) -> Vec<T> {
-        self.vector.iter().map(|x| x.abs() ).collect()
+        self.vector.iter().map(|x| x.norm() ).collect()
     }
 
     // Normalize to unit magnitude
@@ -38,7 +38,7 @@ where
         ComplexVec::from_vec(
             self.vector.iter()
             .map(|c| {
-                let mag = c.abs();
+                let mag = c.norm();
                 if mag > T::zero() {
                     *c / mag
                 } else {
@@ -51,7 +51,7 @@ where
     // In-place normalize to unit magnitude
     pub fn inplace_normalize(&mut self) {
         for c in self.vector.iter_mut() {
-            let mag = c.abs();
+            let mag = c.norm();
             if mag > T::zero() {
                 *c = *c / mag;
             }

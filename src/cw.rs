@@ -1,4 +1,4 @@
-#[warn(dead_code)]
+#![allow(dead_code)]
 
 use num_complex::Complex;
 use std::f64::consts::PI;
