@@ -1568,7 +1568,7 @@ mod tests {
     fn benchmark_complex32_addition() {
         println!("\n=== Benchmark: Complex32 Addition ===");
 
-        for &size in &[10_000, 100_000] {
+        for &size in &[1_000_000] {
             println!("\nVector size: {}", size);
 
             let data_a: Vec<Complex<f32>> = (0..size)
@@ -1625,7 +1625,7 @@ mod tests {
     fn benchmark_complex32_multiplication() {
         println!("\n=== Benchmark: Complex32 Multiplication ===");
 
-        for &size in &[10_000, 100_000] {
+        for &size in &[1_000_000] {
             println!("\nVector size: {}", size);
 
             let data_a: Vec<Complex<f32>> = (0..size)
@@ -1682,7 +1682,7 @@ mod tests {
     fn benchmark_complex32_division() {
         println!("\n=== Benchmark: Complex32 Division ===");
 
-        for &size in &[10_000, 100_000] {
+        for &size in &[1_000_000] {
             println!("\nVector size: {}", size);
 
             let data_a: Vec<Complex<f32>> = (0..size)
@@ -1727,7 +1727,7 @@ mod tests {
     fn benchmark_complex32_convolution() {
         println!("\n=== Benchmark: Complex32 Convolution ===");
 
-        for &size in &[10_000, 100_000] {
+        for &size in &[1_000_000] {
             println!("\nSignal size: {}, Kernel size: 101", size);
 
             let signal_data: Vec<Complex<f32>> = (0..size)
@@ -1783,7 +1783,7 @@ mod tests {
         println!("\nComparing SIMD vs Auto-Vectorized Scalar vs Non-Vectorized Scalar");
         println!("Vector size: 100,000 elements\n");
 
-        const SIZE: usize = 100_000;
+        const SIZE: usize = 1_000_000;
         const ITERATIONS: usize = 10;
 
         let data_a: Vec<f32> = (0..SIZE).map(|i| (i % 1000) as f32 / 1000.0).collect();

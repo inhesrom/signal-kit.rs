@@ -55,7 +55,8 @@ mod tests {
         let one_zero = 0b10;
         let one_one = 0b11;
 
-        let one_root_two = 1.0f32 / 2.0f32.sqrt();
+        let one_root_two = 1.0f32 / 2.0f32.sqrt(); // (2.0).sqrt() / 2.0
+
         let first_quad = Complex32::new(one_root_two, one_root_two);
         let second_quad = Complex32::new(-one_root_two, one_root_two);
         let third_quad = Complex32::new(one_root_two, -one_root_two);
