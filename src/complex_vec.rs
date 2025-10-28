@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use num_complex::{Complex, ComplexFloat};
+use num_complex::{Complex};
 use num_traits::Float;
 
 pub struct ComplexVec<T> {

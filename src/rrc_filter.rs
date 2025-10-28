@@ -1,7 +1,6 @@
 #![allow(dead_code)]
 
-use num_complex::{Complex, ComplexFloat};
-use num_traits::Float;
+use num_complex::ComplexFloat;
 
 pub struct RRCFilter {
     num_filter_taps: usize,
@@ -62,7 +61,7 @@ impl RRCFilter {
 #[cfg(test)]
 mod tests {
     use crate::rrc_filter::RRCFilter;
-    use num_complex::{Complex, Complex32};
+    use num_complex::{Complex32};
 
     #[test]
     fn test_build_filter_f32() {
