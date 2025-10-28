@@ -3,17 +3,19 @@
 mod fft {
 
     use std::fmt::Debug;
+    use std::ops::{DivAssign, RemAssign};
     use num_complex::{Complex};
     use num_traits::{Float, Signed, FromPrimitive};
     use rustfft::FftPlanner;
 
     pub fn fft<T>(input : &mut [Complex<T>])
     where
-        T: Float + Send + Sync + FromPrimitive + Signed + Debug + 'static,
+        T: Float + RemAssign + DivAssign + Send + Sync + FromPrimitive + Signed + Debug + 'static,
     {
         let mut planner = FftPlanner::<T>::new();
         let fft_forward = planner.plan_fft_forward(input.len());
         fft_forward.process(input);
+        scale::<T>(input);
     }
 
     pub fn ifft<T>(input: &mut [Complex<T>])
@@ -27,10 +29,11 @@ mod fft {
 
     pub fn scale<T>(input: &mut [Complex<T>])
     where
-        T: Float + std::ops::RemAssign + std::ops::DivAssign,
+        T: Float + RemAssign + DivAssign,
     {
+        let nfft = T::from(input.len()).unwrap();
         let scale_val = Complex::<T>::new(
-            T::from(1.0).unwrap() / T::from(input.len()).unwrap(),
+            T::from(1.0).unwrap() / nfft,
             T::from(0.0).unwrap()
         );
         input.iter_mut().for_each(|x| *x = *x * scale_val);
@@ -74,7 +77,7 @@ mod tests {
     use crate::fft::*;
     use crate::vector_ops;
 
-    fn assert_near<T: Float, PartialEq>(a: T, b: T, delta: T) {
+    fn assert_near<T: Float>(a: T, b: T, delta: T) {
         assert_eq!((a-b).abs() < delta, true);
     }
 
@@ -106,6 +109,28 @@ mod tests {
         let max_freq = freqs[max_ind].clone();
         println!("Max (ind,val) is: {max_freq},{max_val}");
         assert_eq!(((max_freq as f64) - freq_hz).abs() < 1.0, true);
+    }
+
+    #[test]
+    fn test_ifft() {
+        let signal_original = vec![
+            Complex::new(1.0, 1.0),
+            Complex::new(2.0, 2.0),
+            Complex::new(3.0, 3.0),
+            Complex::new(4.0, 4.0),
+            Complex::new(5.0, 5.0),
+            Complex::new(6.0, 6.0),
+            Complex::new(7.0, 7.0),
+            Complex::new(8.0, 8.0)
+        ];
+        let mut signal_modified = signal_original.clone();
+        fft::fft(&mut signal_modified);
+        fft::ifft(&mut signal_modified);
+
+        for i in 0..signal_original.len() {
+            println!("i: {i} -- Original value: {} vs Modified value {}", signal_original[i], signal_modified[i]);
+            assert_near::<f32>(signal_original[i].norm(), signal_modified[i].norm(), 1e-3);
+        }
     }
 
     #[test]
