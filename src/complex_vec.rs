@@ -84,7 +84,7 @@ where
         for i in 0..output_size {
             let mut sum = Complex::new(T::zero(), T::zero());
             for j in 0..kernel.vector.len() {
-                sum += self.vector[i + j] * kernel.vector[j];
+                sum = sum + self.vector[i + j] * kernel.vector[j];
             }
             result[i] = sum;
         }
