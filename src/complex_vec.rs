@@ -28,6 +28,10 @@ where
         self.vector = vector;  // Ownership transferred, old vector dropped
     }
 
+    pub fn len(&self) -> usize {
+        self.vector.len()
+    }
+
     // Returns real vector of sqrt(r^2 + i^2)
     pub fn abs(&mut self) -> Vec<T> {
         self.vector.iter().map(|x| x.norm() ).collect()
@@ -49,7 +53,7 @@ where
     }
 
     // In-place normalize to unit magnitude
-    pub fn inplace_normalize(&mut self) {
+    pub fn normalize_inplace(&mut self) {
         for c in self.vector.iter_mut() {
             let mag = c.norm();
             if mag > T::zero() {
@@ -58,4 +62,33 @@ where
         }
     }
 
+    pub fn convolve(&self, kernel: &ComplexVec<T>) -> ComplexVec<T> {
+        let output_size = self.vector.len() - kernel.vector.len() + 1;
+        let mut result = vec![Complex::new(T::zero(), T::zero()); output_size];
+
+        for i in 0..output_size {
+            let mut sum = Complex::new(T::zero(), T::zero());
+            for j in 0..kernel.vector.len() {
+                sum = sum + self.vector[i + j] * kernel.vector[j];
+            }
+            result[i] = sum;
+        }
+
+        ComplexVec::from_vec(result)
+    }
+
+    pub fn convolve_inplace(&mut self, kernel: &ComplexVec<T>) {
+        let output_size = self.vector.len() - kernel.vector.len() + 1;
+        let mut result = vec![Complex::new(T::zero(), T::zero()); output_size];
+
+        for i in 0..output_size {
+            let mut sum = Complex::new(T::zero(), T::zero());
+            for j in 0..kernel.vector.len() {
+                sum += self.vector[i + j] * kernel.vector[j];
+            }
+            result[i] = sum;
+        }
+
+        self.vector = result;  // Replace with new truncated vector
+    }
 }
