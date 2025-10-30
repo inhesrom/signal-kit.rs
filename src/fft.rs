@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-mod fft {
+pub mod fft {
 
     use std::fmt::Debug;
     use std::ops::{DivAssign, RemAssign};

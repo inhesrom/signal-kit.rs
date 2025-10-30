@@ -36,3 +36,42 @@ where
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use plotly::{Plot, Scatter};
+    use std::env;
+    use crate::fft::fft;
+    use crate::complex_vec::ComplexVec;
+
+    #[test]
+    fn test_cw_block_gen() {
+        let block_size: usize = 1024;
+        let num_blocks = 100;
+        let freq_hz = -100e3;
+        let sample_rate_hz = 500e3;
+        let mut generator = CW::new(freq_hz, sample_rate_hz, block_size);
+
+        let mut samples: Vec<_> = (0..num_blocks)
+            .flat_map(|_| generator.generate_block::<f64>())
+            .collect();
+
+        assert_eq!(samples.len(), block_size * num_blocks);
+
+        let plot = env::var("TEST_PLOT").unwrap_or_else(|_| "false".to_string());
+        println!("TEST_PLOT env var is {}", plot);
+        if plot.to_lowercase() == "true" {
+            fft::fft::<f64>(&mut samples);
+            let mut cw_fft = ComplexVec::from_vec(samples);
+            let mut cw_fft_abs: Vec<f64> = cw_fft.abs();
+
+            fft::fftshift::<f64>(&mut cw_fft_abs);
+            let freqs: Vec<f64> = fft::fftfreqs::<f64>((-sample_rate_hz/2_f64) as f64, (sample_rate_hz/2_f64) as f64, cw_fft_abs.len());
+
+            let mut plot = Plot::new();
+            let trace = Scatter::new(freqs.clone(), cw_fft_abs.clone());
+            plot.add_trace(trace);
+            plot.show();
+        }
+    }
+}
