@@ -11,9 +11,7 @@ pub struct CW {
     sample_num: usize,
 }
 
-impl CW
-where
-{
+impl CW {
     pub fn new(freq_hz: f64, sample_rate_hz: f64, block_size: usize) -> Self {
         CW {
             freq_hz: freq_hz,
