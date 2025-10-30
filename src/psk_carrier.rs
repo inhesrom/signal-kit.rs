@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+use crate::mod_type::ModType;
+
 pub struct PskCarrier<T> {
     sample_rate: T,
     symbol_rate: T,
