@@ -16,11 +16,40 @@ pub mod modulation {
 use std::collections::HashMap;
 use num_complex::Complex;
 use num_traits::Float;
+use crate::symbol_maps::*;
+use super::ModType;
 
-    struct ModProperties<T> {
-        bits_per_symbol: usize,
-        num_symbols: usize,
-        bit_symbol_map: HashMap<u8, Complex<T>>,
+    /// Trait for modulation/demodulation operations
+    pub trait Modulate<T: Float> {
+        fn modulate(&self, bits: u8) -> Option<Complex<T>>;
+        fn demodulate(&self, symbol: &Complex<T>) -> Option<u8>;
+    }
+
+    /// Enum wrapper to hold any modulation type
+    pub enum Modulation<T: Float> {
+        QPSK(_QPSK<T>),
+        PSK8(_8PSK<T>),
+        APSK16(_16APSK<T>),
+        QAM16(_16QAM<T>),
+        QAM32(_32QAM<T>),
+        QAM64(_64QAM<T>),
+    }
+
+    pub fn get_mod_type_from_enum<T: Float>(mod_enum: ModType) -> Modulation<T> {
+        match mod_enum {
+            ModType::_QPSK => Modulation::QPSK(_QPSK::new(qpsk_gray_map())),
+            ModType::_8PSK => Modulation::PSK8(_8PSK::new(psk8_gray_map())),
+            ModType::_16APSK => Modulation::APSK16(_16APSK::new(apsk16_gray_map())),
+            ModType::_16QAM => Modulation::QAM16(_16QAM::new(qam16_gray_map())),
+            ModType::_32QAM => Modulation::QAM32(_32QAM::new(qam32_gray_map())),
+            ModType::_64QAM => Modulation::QAM64(_64QAM::new(qam64_gray_map())),
+        }
+    }
+
+    pub struct ModProperties<T> {
+        pub bits_per_symbol: usize,
+        pub num_symbols: usize,
+        pub bit_symbol_map: HashMap<u8, Complex<T>>,
     }
 
     pub struct _QPSK<T> {
@@ -36,6 +65,23 @@ use num_traits::Float;
                     bit_symbol_map,
                 }
             }
+        }
+    }
+
+    impl<T: Float> Modulate<T> for _QPSK<T> {
+        fn modulate(&self, bits: u8) -> Option<Complex<T>> {
+            self.mod_properties.bit_symbol_map.get(&bits).copied()
+        }
+
+        fn demodulate(&self, symbol: &Complex<T>) -> Option<u8> {
+            self.mod_properties.bit_symbol_map
+                .iter()
+                .min_by(|(_, s1), (_, s2)| {
+                    let d1 = (*s1 - *symbol).norm_sqr();
+                    let d2 = (*s2 - *symbol).norm_sqr();
+                    d1.partial_cmp(&d2).unwrap()
+                })
+                .map(|(bits, _)| *bits)
         }
     }
 
@@ -55,6 +101,23 @@ use num_traits::Float;
         }
     }
 
+    impl<T: Float> Modulate<T> for _8PSK<T> {
+        fn modulate(&self, bits: u8) -> Option<Complex<T>> {
+            self.mod_properties.bit_symbol_map.get(&bits).copied()
+        }
+
+        fn demodulate(&self, symbol: &Complex<T>) -> Option<u8> {
+            self.mod_properties.bit_symbol_map
+                .iter()
+                .min_by(|(_, s1), (_, s2)| {
+                    let d1 = (*s1 - *symbol).norm_sqr();
+                    let d2 = (*s2 - *symbol).norm_sqr();
+                    d1.partial_cmp(&d2).unwrap()
+                })
+                .map(|(bits, _)| *bits)
+        }
+    }
+
     pub struct _16APSK<T> {
         mod_properties: ModProperties<T>
     }
@@ -68,6 +131,23 @@ use num_traits::Float;
                     bit_symbol_map,
                 }
             }
+        }
+    }
+
+    impl<T: Float> Modulate<T> for _16APSK<T> {
+        fn modulate(&self, bits: u8) -> Option<Complex<T>> {
+            self.mod_properties.bit_symbol_map.get(&bits).copied()
+        }
+
+        fn demodulate(&self, symbol: &Complex<T>) -> Option<u8> {
+            self.mod_properties.bit_symbol_map
+                .iter()
+                .min_by(|(_, s1), (_, s2)| {
+                    let d1 = (*s1 - *symbol).norm_sqr();
+                    let d2 = (*s2 - *symbol).norm_sqr();
+                    d1.partial_cmp(&d2).unwrap()
+                })
+                .map(|(bits, _)| *bits)
         }
     }
 
@@ -87,6 +167,23 @@ use num_traits::Float;
         }
     }
 
+    impl<T: Float> Modulate<T> for _16QAM<T> {
+        fn modulate(&self, bits: u8) -> Option<Complex<T>> {
+            self.mod_properties.bit_symbol_map.get(&bits).copied()
+        }
+
+        fn demodulate(&self, symbol: &Complex<T>) -> Option<u8> {
+            self.mod_properties.bit_symbol_map
+                .iter()
+                .min_by(|(_, s1), (_, s2)| {
+                    let d1 = (*s1 - *symbol).norm_sqr();
+                    let d2 = (*s2 - *symbol).norm_sqr();
+                    d1.partial_cmp(&d2).unwrap()
+                })
+                .map(|(bits, _)| *bits)
+        }
+    }
+
     pub struct _32QAM<T> {
         mod_properties: ModProperties<T>
     }
@@ -103,6 +200,23 @@ use num_traits::Float;
         }
     }
 
+    impl<T: Float> Modulate<T> for _32QAM<T> {
+        fn modulate(&self, bits: u8) -> Option<Complex<T>> {
+            self.mod_properties.bit_symbol_map.get(&bits).copied()
+        }
+
+        fn demodulate(&self, symbol: &Complex<T>) -> Option<u8> {
+            self.mod_properties.bit_symbol_map
+                .iter()
+                .min_by(|(_, s1), (_, s2)| {
+                    let d1 = (*s1 - *symbol).norm_sqr();
+                    let d2 = (*s2 - *symbol).norm_sqr();
+                    d1.partial_cmp(&d2).unwrap()
+                })
+                .map(|(bits, _)| *bits)
+        }
+    }
+
     pub struct _64QAM<T> {
         mod_properties: ModProperties<T>
     }
@@ -115,6 +229,80 @@ use num_traits::Float;
                     num_symbols: 64,
                     bit_symbol_map,
                 }
+            }
+        }
+    }
+
+    impl<T: Float> Modulate<T> for _64QAM<T> {
+        fn modulate(&self, bits: u8) -> Option<Complex<T>> {
+            self.mod_properties.bit_symbol_map.get(&bits).copied()
+        }
+
+        fn demodulate(&self, symbol: &Complex<T>) -> Option<u8> {
+            self.mod_properties.bit_symbol_map
+                .iter()
+                .min_by(|(_, s1), (_, s2)| {
+                    let d1 = (*s1 - *symbol).norm_sqr();
+                    let d2 = (*s2 - *symbol).norm_sqr();
+                    d1.partial_cmp(&d2).unwrap()
+                })
+                .map(|(bits, _)| *bits)
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn test_qpsk_modulate() {
+            let qpsk = _QPSK::<f64>::new(crate::symbol_maps::qpsk_gray_map());
+
+            let symbol = qpsk.modulate(0b00).unwrap();
+            assert!(symbol.re > 0.0 && symbol.im > 0.0);
+
+            let symbol = qpsk.modulate(0b11).unwrap();
+            assert!(symbol.re < 0.0 && symbol.im < 0.0);
+        }
+
+        #[test]
+        fn test_qpsk_demodulate() {
+            let qpsk = _QPSK::<f64>::new(crate::symbol_maps::qpsk_gray_map());
+
+            let symbol = qpsk.modulate(0b01).unwrap();
+            let bits = qpsk.demodulate(&symbol).unwrap();
+            assert_eq!(bits, 0b01);
+        }
+
+        #[test]
+        fn test_psk8_modulate() {
+            let psk8 = _8PSK::<f64>::new(crate::symbol_maps::psk8_gray_map());
+
+            let symbol = psk8.modulate(0b000).unwrap();
+            assert!(symbol.norm() > 0.99 && symbol.norm() < 1.01);
+        }
+
+        #[test]
+        fn test_qam16_modulate_demodulate() {
+            let qam16 = _16QAM::<f64>::new(crate::symbol_maps::qam16_gray_map());
+
+            for bits in 0..16u8 {
+                let symbol = qam16.modulate(bits).unwrap();
+                let decoded = qam16.demodulate(&symbol).unwrap();
+                assert_eq!(bits, decoded);
+            }
+        }
+
+        #[test]
+        fn test_get_mod_type_from_enum() {
+            let modulation = get_mod_type_from_enum::<f64>(ModType::_QPSK);
+
+            match modulation {
+                Modulation::QPSK(qpsk) => {
+                    let symbol = qpsk.modulate(0b00).unwrap();
+                    assert!(symbol.norm() > 0.0);
+                },
+                _ => panic!("Expected QPSK variant"),
             }
         }
     }
