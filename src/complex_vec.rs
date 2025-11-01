@@ -4,6 +4,7 @@ use num_complex::{Complex};
 use num_traits::Float;
 use std::ops::{Index, IndexMut};
 
+#[derive(Clone)]
 pub struct ComplexVec<T> {
     vector: Vec<Complex<T>>,
 }
@@ -27,6 +28,18 @@ where
 
     pub fn replace_vec(&mut self, vector: Vec<Complex<T>>) {
         self.vector = vector;  // Ownership transferred, old vector dropped
+    }
+
+    pub fn iter(&self) -> std::slice::Iter<'_, Complex<T>> {
+        self.vector.iter()
+    }
+
+    pub fn iter_mut(&mut self) -> std::slice::IterMut<'_, Complex<T>> {
+        self.vector.iter_mut()
+    }
+
+    pub fn extend<I: IntoIterator<Item = Complex<T>>>(&mut self, iter: I) {
+        self.vector.extend(iter);
     }
 
     pub fn len(&self) -> usize {
@@ -111,6 +124,15 @@ where
 {
     fn index_mut(&mut self, idx: usize) -> &mut Self::Output {
         &mut self.vector[idx]
+    }
+}
+
+impl<T> Extend<Complex<T>> for ComplexVec<T>
+where
+    T: Float,
+{
+    fn extend<I: IntoIterator<Item = Complex<T>>>(&mut self, iter: I) {
+        self.vector.extend(iter);
     }
 }
 
