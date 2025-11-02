@@ -13,7 +13,7 @@ pub struct RRCFilter {
 
 impl RRCFilter {
     pub fn new(num_filter_taps: usize, sample_rate: f64, symbol_rate: f64, beta: f64) -> Self {
-        let sps = sample_rate / symbol_rate;
+        let sps: f64 = sample_rate / symbol_rate;
         let scale = 1.0f64 / sample_rate;
 
         RRCFilter {

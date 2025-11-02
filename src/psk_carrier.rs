@@ -40,6 +40,11 @@ impl<T: Float> PskCarrier<T> {
         // Get modulation with pre-built HashMap once
         let modulation = modulation::get_mod_type_from_enum::<T>(mod_type);
 
+        // Initialize overlap_symbols with (filter_taps - 1) zeros for proper first block sizing
+        let overlap_size = filter_taps - 1;
+        let zero_symbols = vec![num_complex::Complex::new(T::zero(), T::zero()); overlap_size];
+        let overlap_symbols = ComplexVec::from_vec(zero_symbols);
+
         PskCarrier {
             sample_rate_hz,
             symbol_rate_hz,
@@ -49,7 +54,7 @@ impl<T: Float> PskCarrier<T> {
             current_sample_num: 0,
             bit_gen,
             filter_taps,
-            overlap_symbols: ComplexVec::new(),
+            overlap_symbols,
             rrc_filter,
             modulation,
         }
@@ -141,5 +146,68 @@ impl<T: Float> PskCarrier<T> {
             last_symbols.push(symbols[i]);
         }
         ComplexVec::from_vec(last_symbols)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::env;
+    use plotly::{Plot, Scatter};
+    use crate::fft::fft::{fft, fftshift, fftfreqs};
+    use crate::vector_ops;
+
+    #[test]
+    fn test_qpsk_carrier_block_gen() {
+        let block_size: usize = 1e6 as usize;
+        let num_blocks = 1;
+        let sample_rate_hz = 1e6_f64;
+        let symbol_rate_hz = 800e3_f64;
+        let filter_taps = 51;
+        let rolloff_factor = 0.05_f64;
+
+        let mut carrier = PskCarrier::new(
+            sample_rate_hz,
+            symbol_rate_hz,
+            ModType::_QPSK,
+            rolloff_factor,
+            block_size,
+            filter_taps,
+            Some(42), // Seed for reproducibility
+        );
+
+        // Generate 100 blocks and merge into single ComplexVec
+        let mut all_samples = ComplexVec::new();
+        for _ in 0..num_blocks {
+            let block = carrier.generate_block();
+            all_samples.extend(block.iter().cloned());
+        }
+
+        assert_eq!(all_samples.len(), block_size * num_blocks);
+
+        let plot = env::var("TEST_PLOT").unwrap_or_else(|_| "false".to_string());
+        println!("TEST_PLOT env var is {}", plot);
+        if plot.to_lowercase() == "true" {
+            // Convert to Vec for FFT
+            let mut samples_vec: Vec<_> = (0..all_samples.len())
+                .map(|i| all_samples[i])
+                .collect();
+
+            fft::<f64>(&mut samples_vec);
+            let mut qpsk_fft = ComplexVec::from_vec(samples_vec);
+            let mut qpsk_fft_abs: Vec<f64> = vector_ops::to_db(&qpsk_fft.abs());
+
+            fftshift::<f64>(&mut qpsk_fft_abs);
+            let freqs: Vec<f64> = fftfreqs::<f64>(
+                -sample_rate_hz / 2_f64,
+                sample_rate_hz / 2_f64,
+                qpsk_fft_abs.len()
+            );
+
+            let mut plot = Plot::new();
+            let trace = Scatter::new(freqs.clone(), qpsk_fft_abs.clone());
+            plot.add_trace(trace);
+            plot.show();
+        }
     }
 }
