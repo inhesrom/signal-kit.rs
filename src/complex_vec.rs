@@ -4,6 +4,20 @@ use num_complex::{Complex};
 use num_traits::Float;
 use std::ops::{Index, IndexMut};
 
+/// Convolution mode
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ConvMode {
+    /// Full convolution: output_size = input_size + kernel_size - 1
+    /// Best for pulse shaping - preserves all convolution outputs
+    Full,
+    /// Same mode: output_size = input_size
+    /// Centers the kernel to keep output same size as input
+    Same,
+    /// Valid mode: output_size = input_size - kernel_size + 1
+    /// Only outputs where kernel fully overlaps signal
+    Valid,
+}
+
 #[derive(Clone)]
 pub struct ComplexVec<T> {
     vector: Vec<Complex<T>>,
@@ -76,34 +90,57 @@ where
         }
     }
 
-    pub fn convolve(&self, kernel: &ComplexVec<T>) -> ComplexVec<T> {
-        let output_size = self.vector.len() - kernel.vector.len() + 1;
-        let mut result = vec![Complex::new(T::zero(), T::zero()); output_size];
+    /// Convolve with a kernel using specified mode
+    /// - ConvMode::Full: output_size = input_size + kernel_size - 1 (default, best for pulse shaping)
+    /// - ConvMode::Same: output_size = input_size (keeps same size as input)
+    /// - ConvMode::Valid: output_size = input_size - kernel_size + 1 (only fully overlapped outputs)
+    pub fn convolve(&self, kernel: &ComplexVec<T>, mode: ConvMode) -> ComplexVec<T> {
+        let input_len = self.vector.len();
+        let kernel_len = kernel.vector.len();
 
-        for i in 0..output_size {
+        // Compute convolution in full mode first
+        let full_size = input_len + kernel_len - 1;
+        let mut full_result = vec![Complex::new(T::zero(), T::zero()); full_size];
+
+        // Full convolution computation
+        // Note: This implements cross-correlation (not true convolution with kernel flip)
+        // This matches the behavior of the original implementation
+        for i in 0..full_size {
             let mut sum = Complex::new(T::zero(), T::zero());
-            for j in 0..kernel.vector.len() {
-                sum = sum + self.vector[i + j] * kernel.vector[j];
+            for j in 0..kernel_len {
+                // Correlation: y[i] = sum(x[i+j] * h[j])  for valid indices
+                // For full mode, we need to account for zero-padding
+                if i + j >= kernel_len - 1 && i + j < input_len + kernel_len - 1 {
+                    let signal_idx = i + j - (kernel_len - 1);
+                    if signal_idx < input_len {
+                        sum = sum + self.vector[signal_idx] * kernel.vector[j];
+                    }
+                }
             }
-            result[i] = sum;
+            full_result[i] = sum;
         }
+
+        // Extract the appropriate portion based on mode
+        let result = match mode {
+            ConvMode::Full => full_result,
+            ConvMode::Same => {
+                // Center the output to match input size
+                let delay = (kernel_len - 1) / 2;
+                full_result[delay..delay + input_len].to_vec()
+            },
+            ConvMode::Valid => {
+                // Only fully overlapped portion
+                let valid_size = input_len - kernel_len + 1;
+                full_result[kernel_len - 1..kernel_len - 1 + valid_size].to_vec()
+            },
+        };
 
         ComplexVec::from_vec(result)
     }
 
-    pub fn convolve_inplace(&mut self, kernel: &ComplexVec<T>) {
-        let output_size = self.vector.len() - kernel.vector.len() + 1;
-        let mut result = vec![Complex::new(T::zero(), T::zero()); output_size];
-
-        for i in 0..output_size {
-            let mut sum = Complex::new(T::zero(), T::zero());
-            for j in 0..kernel.vector.len() {
-                sum = sum + self.vector[i + j] * kernel.vector[j];
-            }
-            result[i] = sum;
-        }
-
-        self.vector = result;  // Replace with new truncated vector
+    pub fn convolve_inplace(&mut self, kernel: &ComplexVec<T>, mode: ConvMode) {
+        let convolved = self.convolve(kernel, mode);
+        self.vector = convolved.vector;
     }
 }
 
@@ -223,7 +260,7 @@ mod tests {
     }
 
     #[test]
-    fn test_convolve() {
+    fn test_convolve_valid() {
         let signal = vec![
             Complex::new(1.0, 0.0),
             Complex::new(2.0, 0.0),
@@ -238,13 +275,59 @@ mod tests {
 
         let sig = ComplexVec::from_vec(signal);
         let ker = ComplexVec::from_vec(kernel);
-        let result = sig.convolve(&ker);
+        let result = sig.convolve(&ker, ConvMode::Valid);
 
-        assert_eq!(result.len(), 4);
+        assert_eq!(result.len(), 4); // 5 - 2 + 1 = 4
         assert_eq!(result.vector[0], Complex::new(4.0, 0.0));
         assert_eq!(result.vector[1], Complex::new(7.0, 0.0));
         assert_eq!(result.vector[2], Complex::new(10.0, 0.0));
         assert_eq!(result.vector[3], Complex::new(13.0, 0.0));
+    }
+
+    #[test]
+    fn test_convolve_full() {
+        let signal = vec![
+            Complex::new(1.0, 0.0),
+            Complex::new(2.0, 0.0),
+            Complex::new(3.0, 0.0),
+        ];
+        let kernel = vec![
+            Complex::new(1.0, 0.0),
+            Complex::new(1.0, 0.0),
+        ];
+
+        let sig = ComplexVec::from_vec(signal);
+        let ker = ComplexVec::from_vec(kernel);
+        let result = sig.convolve(&ker, ConvMode::Full);
+
+        assert_eq!(result.len(), 4); // 3 + 2 - 1 = 4
+        assert_eq!(result.vector[0], Complex::new(1.0, 0.0));
+        assert_eq!(result.vector[1], Complex::new(3.0, 0.0));
+        assert_eq!(result.vector[2], Complex::new(5.0, 0.0));
+        assert_eq!(result.vector[3], Complex::new(3.0, 0.0));
+    }
+
+    #[test]
+    fn test_convolve_same() {
+        let signal = vec![
+            Complex::new(1.0, 0.0),
+            Complex::new(2.0, 0.0),
+            Complex::new(3.0, 0.0),
+        ];
+        let kernel = vec![
+            Complex::new(1.0, 0.0),
+            Complex::new(1.0, 0.0),
+        ];
+
+        let sig = ComplexVec::from_vec(signal);
+        let ker = ComplexVec::from_vec(kernel);
+        let result = sig.convolve(&ker, ConvMode::Same);
+
+        assert_eq!(result.len(), 3); // Same as input
+        // In same mode with kernel size 2, output is shifted by (2-1)/2 = 0
+        assert_eq!(result.vector[0], Complex::new(1.0, 0.0));
+        assert_eq!(result.vector[1], Complex::new(3.0, 0.0));
+        assert_eq!(result.vector[2], Complex::new(5.0, 0.0));
     }
 
     #[test]
@@ -261,7 +344,7 @@ mod tests {
 
         let mut sig = ComplexVec::from_vec(signal);
         let ker = ComplexVec::from_vec(kernel);
-        sig.convolve_inplace(&ker);
+        sig.convolve_inplace(&ker, ConvMode::Valid);
 
         assert_eq!(sig.len(), 2);
         assert_eq!(sig.vector[0], Complex::new(3.0, 0.0));
@@ -278,7 +361,7 @@ mod tests {
 
         let sig = ComplexVec::from_vec(signal.clone());
         let imp = ComplexVec::from_vec(impulse);
-        let result = sig.convolve(&imp);
+        let result = sig.convolve(&imp, ConvMode::Valid);
 
         for i in 0..signal.len() {
             println!("Signal: {}, Convolved Result: {}", signal[i], result[i]);

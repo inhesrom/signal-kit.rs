@@ -8,6 +8,7 @@ pub struct RRCFilter {
     num_filter_taps: usize,
     beta: f64,
     sps: f64, //samples per symbol
+    symbol_rate: f64,
     scale: f64,
 }
 
@@ -20,6 +21,7 @@ impl RRCFilter {
             num_filter_taps,
             beta,
             sps,
+            symbol_rate,
             scale
         }
     }
@@ -31,24 +33,44 @@ impl RRCFilter {
         let two = 2.0f64;
         let four = 4.0f64;
 
-        let taps: Vec<f64> = (0..self.num_filter_taps).map(|i| {
-            let t = i as f64 - self.num_filter_taps as f64 / two;
-            let t = t * self.scale;
+        let mut taps: Vec<f64> = (0..self.num_filter_taps).map(|i| {
+            // Use integer center to ensure t=0 at center tap
+            let center = (self.num_filter_taps - 1) as f64 / two;
+            let t = (i as f64 - center) * self.scale;
+
+            // Normalize time by symbol period: t_norm = t * symbol_rate = t / T
+            let t_norm = t * self.symbol_rate;
 
             if t == zero {
-                (one + self.beta * (four / pi - one)) / self.sps
+                // At t=0: h(0) = (1 + β*(4/π - 1)) / T
+                (one + self.beta * (four / pi - one)) * self.symbol_rate
             }
-            else if t.abs() == (self.sps / (four * self.beta)).abs() {
-                (self.beta / two.sqrt()) *
+            else if (four * self.beta * t_norm).abs() == one {
+                // At discontinuity: t = ±T/(4β)
+                let sqrt2 = two.sqrt();
+                (self.beta / sqrt2) *
                 ((one + two / pi) * (pi / (four * self.beta)).sin() +
-                 (one - two / pi) * (pi / (four * self.beta)).cos()) / self.sps
+                 (one - two / pi) * (pi / (four * self.beta)).cos()) * self.symbol_rate
             }
             else {
-                ((pi * t * (one - self.beta) / self.sps).sin() +
-                 four * self.beta * t * (pi * t * (one + self.beta) / self.sps).cos() / self.sps) /
-                (pi * t * (one - (four * self.beta * t / self.sps) * (four * self.beta * t / self.sps)) / self.sps)
+                // General case:
+                // h(t) = [sin(π*t/T*(1-β)) + 4*β*t/T*cos(π*t/T*(1+β))] / [π*t/T*(1-(4*β*t/T)²)]
+                let numerator = (pi * t_norm * (one - self.beta)).sin() +
+                                four * self.beta * t_norm * (pi * t_norm * (one + self.beta)).cos();
+                let denominator = pi * t_norm * (one - (four * self.beta * t_norm).powi(2));
+                numerator / denominator * self.symbol_rate
             }
         }).collect();
+
+        // Normalize filter for unit energy
+        // For a pulse shaping filter, we want the energy (sum of squares) to equal 1
+        let energy: f64 = taps.iter().map(|&x| x * x).sum();
+        let norm_factor = energy.sqrt();
+        if norm_factor > zero {
+            for tap in taps.iter_mut() {
+                *tap /= norm_factor;
+            }
+        }
 
         // Convert real taps to complex with zero imaginary part
         let complex_taps: Vec<Complex<T>> = taps.iter()
