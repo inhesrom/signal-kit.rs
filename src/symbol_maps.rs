@@ -5,6 +5,17 @@ use num_complex::Complex;
 use num_traits::Float;
 use std::f64::consts::PI;
 
+pub fn bpsk_map<T: Float>() -> HashMap<u8, Complex<T>> {
+    let mut map = HashMap::new();
+    let zero = T::from(0).unwrap();
+    let one = T::from(1).unwrap();
+
+    map.insert(0b0, Complex::new(one, zero));
+    map.insert(0b1, Complex::new(-one, zero));
+
+    map
+}
+
 /// QPSK Gray-coded constellation map (2 bits per symbol)
 /// Constellation points are normalized to unit power
 pub fn qpsk_gray_map<T: Float>() -> HashMap<u8, Complex<T>> {
@@ -251,6 +262,17 @@ pub fn qam64_gray_map<T: Float>() -> HashMap<u8, Complex<T>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_bpsk_map() {
+        let map = bpsk_map::<f32>();
+        assert_eq!(map.len(), 2);
+
+        for val in map.values() {
+            let power = val.norm_sqr();
+            assert!((power - 1.0).abs() < 1e-10);
+        }
+    }
 
     #[test]
     fn test_qpsk_gray_map() {
