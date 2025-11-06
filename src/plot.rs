@@ -1,20 +1,23 @@
 use num_complex::Complex;
 use num_traits::Float;
-use serde_core::ser::Serialize;
 use plotly::{Plot, Scatter, Layout};
 use plotly::common::Mode;
 use plotly::layout::Axis;
 
-pub fn plot_spectrum<T: Float + serde_core::ser::Serialize>(freqs: &Vec<T>, spectrum: &Vec<T>) {
+pub fn plot_spectrum<T: Float>(freqs: &Vec<T>, spectrum: &Vec<T>) {
+    // Convert to f64 for plotting
+    let freqs_f64: Vec<f64> = freqs.iter().map(|f| f.to_f64().unwrap()).collect();
+    let spectrum_f64: Vec<f64> = spectrum.iter().map(|s| s.to_f64().unwrap()).collect();
+
     let mut plot = Plot::new();
-    let trace = Scatter::new(freqs.clone(), spectrum.clone());
+    let trace = Scatter::new(freqs_f64, spectrum_f64);
     plot.add_trace(trace);
 
-    use plotly::Layout;
     let layout = Layout::new()
         .title("RRC Filter Frequency Response")
-        .x_axis(plotly::layout::Axis::new().title("Frequency (Hz)"))
-        .y_axis(plotly::layout::Axis::new().title("Magnitude (dB)"));
+        .x_axis(Axis::new().title("Frequency (Hz)"))
+        .y_axis(Axis::new().title("Magnitude (dB)"))
+        .auto_size(true);
     plot.set_layout(layout);
 
     plot.show();
@@ -83,7 +86,8 @@ pub fn plot_constellation<T: Float + std::fmt::Display>(symbols: &[Complex<T>], 
                 .title("Quadrature (Q)")
                 .scale_anchor("x")
                 .constrain(plotly::layout::AxisConstrain::Domain)
-        );
+        )
+        .auto_size(true);
     plot.set_layout(layout);
 
     // Show the plot
