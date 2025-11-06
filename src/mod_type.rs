@@ -10,6 +10,7 @@ pub enum ModType {
     _16QAM,
     _32QAM,
     _64QAM,
+    _CW,
 }
 
 pub mod modulation {
@@ -46,6 +47,7 @@ use super::ModType;
             ModType::_16QAM => Modulation::QAM16(_16QAM::new(qam16_gray_map())),
             ModType::_32QAM => Modulation::QAM32(_32QAM::new(qam32_gray_map())),
             ModType::_64QAM => Modulation::QAM64(_64QAM::new(qam64_gray_map())),
+            ModType::_CW => unreachable!("CW is handled separately by Carrier, not through modulation system"),
         }
     }
 

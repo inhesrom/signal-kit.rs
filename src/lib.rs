@@ -14,6 +14,11 @@ mod psk_carrier;
 mod fsk_carrier;
 mod ofdm_carrier;
 mod welch;
+mod carrier;
+
+pub use carrier::Carrier;
+pub use complex_vec::ComplexVec;
+pub use mod_type::ModType;
 
 #[cfg(test)]
 pub mod plot;

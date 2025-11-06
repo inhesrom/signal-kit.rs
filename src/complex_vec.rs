@@ -2,7 +2,7 @@
 
 use num_complex::{Complex};
 use num_traits::Float;
-use std::ops::{Index, IndexMut};
+use std::ops::{Index, IndexMut, Add, Sub};
 
 /// Convolution mode
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -142,6 +142,33 @@ where
         let convolved = self.convolve(kernel, mode);
         self.vector = convolved.vector;
     }
+
+    /// Frequency shift signal using time-domain multiplication by e^(j2πf_shift·n/fs)
+    ///
+    /// # Arguments
+    /// * `freq_offset` - Frequency offset in Hz
+    /// * `sample_rate` - Sample rate in Hz
+    ///
+    /// # Panics
+    /// Panics if sample_rate is 0 or negative
+    pub fn freq_shift(&mut self, freq_offset: f64, sample_rate: f64) {
+        assert!(sample_rate > 0.0, "sample_rate must be positive");
+
+        let normalized_freq = freq_offset / sample_rate;
+        let two_pi = T::from(std::f64::consts::PI).unwrap() * T::from(2.0).unwrap();
+
+        for (n, sample) in self.vector.iter_mut().enumerate() {
+            let phase = two_pi * T::from(normalized_freq).unwrap() * T::from(n as f64).unwrap();
+            let phase_f64 = phase.to_f64().unwrap();
+
+            // e^(j*phase) = cos(phase) + j*sin(phase)
+            let cos_phase = T::from(phase_f64.cos()).unwrap();
+            let sin_phase = T::from(phase_f64.sin()).unwrap();
+            let rotator = Complex::new(cos_phase, sin_phase);
+
+            *sample = *sample * rotator;
+        }
+    }
 }
 
 impl<T> Index<usize> for ComplexVec<T>
@@ -170,6 +197,94 @@ where
 {
     fn extend<I: IntoIterator<Item = Complex<T>>>(&mut self, iter: I) {
         self.vector.extend(iter);
+    }
+}
+
+impl<T> Add for ComplexVec<T>
+where
+    T: Float,
+{
+    type Output = Self;
+
+    fn add(self, other: ComplexVec<T>) -> Self {
+        assert_eq!(
+            self.vector.len(),
+            other.vector.len(),
+            "ComplexVec addition requires equal lengths"
+        );
+        let result = self
+            .vector
+            .iter()
+            .zip(other.vector.iter())
+            .map(|(a, b)| a + b)
+            .collect();
+        ComplexVec::from_vec(result)
+    }
+}
+
+impl<T> Add for &ComplexVec<T>
+where
+    T: Float,
+{
+    type Output = ComplexVec<T>;
+
+    fn add(self, other: &ComplexVec<T>) -> ComplexVec<T> {
+        assert_eq!(
+            self.vector.len(),
+            other.vector.len(),
+            "ComplexVec addition requires equal lengths"
+        );
+        let result = self
+            .vector
+            .iter()
+            .zip(other.vector.iter())
+            .map(|(a, b)| a + b)
+            .collect();
+        ComplexVec::from_vec(result)
+    }
+}
+
+impl<T> Sub for ComplexVec<T>
+where
+    T: Float,
+{
+    type Output = Self;
+
+    fn sub(self, other: ComplexVec<T>) -> Self {
+        assert_eq!(
+            self.vector.len(),
+            other.vector.len(),
+            "ComplexVec subtraction requires equal lengths"
+        );
+        let result = self
+            .vector
+            .iter()
+            .zip(other.vector.iter())
+            .map(|(a, b)| a - b)
+            .collect();
+        ComplexVec::from_vec(result)
+    }
+}
+
+impl<T> Sub for &ComplexVec<T>
+where
+    T: Float,
+{
+    type Output = ComplexVec<T>;
+
+    fn sub(self, other: &ComplexVec<T>) -> ComplexVec<T> {
+        assert_eq!(
+            self.vector.len(),
+            other.vector.len(),
+            "ComplexVec subtraction requires equal lengths"
+        );
+        let result = self
+            .vector
+            .iter()
+            .zip(other.vector.iter())
+            .map(|(a, b)| a - b)
+            .collect();
+        ComplexVec::from_vec(result)
     }
 }
 
