@@ -69,7 +69,6 @@ pub mod fft {
 mod tests {
     use num_complex::{Complex};
     use num_traits::{Float};
-    use plotly::{Plot, Scatter};
     use std::env;
 
     use crate::complex_vec::ComplexVec;
@@ -99,10 +98,8 @@ mod tests {
         let plot = env::var("TEST_PLOT").unwrap_or_else(|_| "false".to_string());
         println!("TEST_PLOT env var is {}", plot);
         if plot.to_lowercase() == "true" {
-            let mut plot = Plot::new();
-            let trace = Scatter::new(freqs.clone(), cw_fft_abs.clone());
-            plot.add_trace(trace);
-            plot.show();
+            use crate::plot::plot_spectrum;
+            plot_spectrum(&freqs, &cw_fft_abs, "CW Signal Spectrum");
         }
 
         let (max_ind, max_val) = vector_ops::max(&cw_fft_abs);

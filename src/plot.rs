@@ -4,7 +4,15 @@ use plotly::{Plot, Scatter, Layout};
 use plotly::common::Mode;
 use plotly::layout::Axis;
 
-pub fn plot_spectrum<T: Float>(freqs: &Vec<T>, spectrum: &Vec<T>) {
+/// Plot a spectrum or frequency response
+///
+/// This function creates a plot showing frequency vs magnitude (typically in dB).
+///
+/// # Arguments
+/// * `freqs` - Frequency values for x-axis
+/// * `spectrum` - Magnitude values for y-axis (typically in dB)
+/// * `title` - Title for the plot
+pub fn plot_spectrum<T: Float>(freqs: &Vec<T>, spectrum: &Vec<T>, title: &str) {
     // Convert to f64 for plotting
     let freqs_f64: Vec<f64> = freqs.iter().map(|f| f.to_f64().unwrap()).collect();
     let spectrum_f64: Vec<f64> = spectrum.iter().map(|s| s.to_f64().unwrap()).collect();
@@ -14,7 +22,7 @@ pub fn plot_spectrum<T: Float>(freqs: &Vec<T>, spectrum: &Vec<T>) {
     plot.add_trace(trace);
 
     let layout = Layout::new()
-        .title("RRC Filter Frequency Response")
+        .title(title)
         .x_axis(Axis::new().title("Frequency (Hz)"))
         .y_axis(Axis::new().title("Magnitude (dB)"))
         .auto_size(true);

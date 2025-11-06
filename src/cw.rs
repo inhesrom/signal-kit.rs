@@ -37,7 +37,6 @@ impl CW {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use plotly::{Plot, Scatter};
     use std::env;
     use crate::fft::fft;
     use crate::complex_vec::ComplexVec;
@@ -66,10 +65,8 @@ mod tests {
             fft::fftshift::<f64>(&mut cw_fft_abs);
             let freqs: Vec<f64> = fft::fftfreqs::<f64>((-sample_rate_hz/2_f64) as f64, (sample_rate_hz/2_f64) as f64, cw_fft_abs.len());
 
-            let mut plot = Plot::new();
-            let trace = Scatter::new(freqs.clone(), cw_fft_abs.clone());
-            plot.add_trace(trace);
-            plot.show();
+            use crate::plot::plot_spectrum;
+            plot_spectrum(&freqs, &cw_fft_abs, "CW Signal Spectrum");
         }
     }
 }

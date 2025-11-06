@@ -213,7 +213,6 @@ impl<T: Float> PskCarrier<T> {
 mod tests {
     use super::*;
     use std::env;
-    use plotly::{Plot, Scatter};
     use crate::fft::fft::{fft, fftshift, fftfreqs};
     use crate::vector_ops;
 
@@ -307,18 +306,8 @@ mod tests {
             let max_db = qpsk_fft_abs.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
             println!("Peak spectrum level: {:.2} dB", max_db);
 
-            let mut plot = Plot::new();
-            let trace = Scatter::new(freqs.clone(), qpsk_fft_abs.clone());
-            plot.add_trace(trace);
-
-            use plotly::Layout;
-            let layout = Layout::new()
-                .title("QPSK Signal Spectrum")
-                .x_axis(plotly::layout::Axis::new().title("Frequency (Hz)"))
-                .y_axis(plotly::layout::Axis::new().title("Magnitude (dB)"));
-            plot.set_layout(layout);
-
-            plot.show();
+            use crate::plot::plot_spectrum;
+            plot_spectrum(&freqs, &qpsk_fft_abs, "QPSK Signal Spectrum");
         }
     }
 
@@ -394,7 +383,6 @@ mod tests {
     #[test]
     fn test_rrc_filter_frequency_response() {
         use std::env;
-        use plotly::{Plot, Scatter};
         use crate::fft::fft::{fft, fftshift, fftfreqs};
         use crate::vector_ops;
 
@@ -452,17 +440,7 @@ mod tests {
             freq_response_db.len()
         );
 
-        let mut plot = Plot::new();
-        let trace = Scatter::new(freqs.clone(), freq_response_db.clone());
-        plot.add_trace(trace);
-
-        use plotly::Layout;
-        let layout = Layout::new()
-            .title("RRC Filter Frequency Response")
-            .x_axis(plotly::layout::Axis::new().title("Frequency (Hz)"))
-            .y_axis(plotly::layout::Axis::new().title("Magnitude (dB)"));
-        plot.set_layout(layout);
-
-        plot.show();
+        use crate::plot::plot_spectrum;
+        plot_spectrum(&freqs, &freq_response_db, "RRC Filter Frequency Response");
     }
 }
