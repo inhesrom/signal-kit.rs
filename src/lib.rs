@@ -10,6 +10,7 @@ mod vector_ops;
 mod cw;
 mod awgn;
 mod psk_carrier;
+mod fsk_carrier;
 mod ofdm_carrier;
 
 #[cfg(test)]
