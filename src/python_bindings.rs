@@ -50,7 +50,7 @@ fn parse_modulation(mod_str: &str) -> PyResult<ModType> {
 ///     ...     seed=42
 ///     ... )
 ///     >>> iq_samples = carrier.generate(1000)
-#[pyclass]
+#[pyclass(name = "Carrier")]
 pub struct PythonCarrier {
     inner: Carrier,
 }
@@ -58,6 +58,7 @@ pub struct PythonCarrier {
 #[pymethods]
 impl PythonCarrier {
     #[new]
+    #[pyo3(signature = (modulation, bandwidth, center_freq, snr_db, rolloff, sample_rate_hz, seed=None))]
     fn new(
         modulation: &str,
         bandwidth: f64,
