@@ -3,6 +3,9 @@ name = "signal-kit"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+crate-type = ["rlib", "cdylib"]
+
 [dependencies]
 rustfft = "6.2.0"
 num-complex = "0.4"
@@ -12,6 +15,12 @@ rand_distr = "0.4"
 wide = "0.8.1"
 bimap = "0.6.3"
 bytemuck = "1.24"
+pyo3 = { version = "0.22", features = ["extension-module"], optional = true }
+numpy = { version = "0.22", optional = true }
 
 [dev-dependencies]
 plotly = "0.13"
+
+[features]
+default = []
+python = ["pyo3", "numpy"]

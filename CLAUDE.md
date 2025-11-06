@@ -8,20 +8,16 @@ SignalKit.rs is a Rust library for digital signal processing, focused on communi
 
 ## Build and Test Commands
 
+### Rust (Core Library)
+
 ```bash
-# Build the project
+# Build the project (Rust-only, no Python bindings)
 cargo build
 
 # Build with optimizations
 cargo build --release
 
-# Run the main binary
-cargo run
-
-# Run with optimizations
-cargo run --release
-
-# Run all tests
+# Run all Rust tests
 cargo test
 
 # Run tests for a specific module
@@ -32,6 +28,42 @@ cargo test random_bit_generator
 # Run a specific test
 cargo test test_qpsk_mapper
 ```
+
+### Python Bindings
+
+```bash
+# Build Python bindings (requires maturin)
+# Install maturin first: pip install maturin
+
+# Install in development environment
+maturin develop
+
+# Build wheel for distribution
+maturin build
+
+# Run Python tests (after maturin develop)
+pytest tests/python/
+
+# Run specific Python test
+pytest tests/python/test_carrier.py::TestCarrierGeneration::test_generate_returns_numpy_array
+```
+
+**Important**: By default, the Cargo build does NOT include Python support. This ensures the core Rust library can be used without any Python dependencies.
+
+**For Python bindings, you MUST use `maturin`**, which properly configures Python development headers and linking:
+
+```bash
+# Install maturin
+pip install maturin
+
+# For development: install in current Python environment
+maturin develop
+
+# For distribution: build a wheel
+maturin build --release
+```
+
+Do NOT use `cargo build --features python` directly, as it lacks proper Python environment configuration. The `python` feature flag is used automatically by maturin during the build process.
 
 ## Architecture
 
@@ -84,6 +116,66 @@ Note: The RRC filter is implemented but not yet integrated into the main pipelin
 - `rand`: Random number generation
 - `wide`: SIMD operations (not currently used in visible code)
 - `bimap`: Bidirectional maps (not currently used in visible code)
+
+### Optional Dependencies (Python Bindings)
+
+When the `python` feature is enabled:
+- `pyo3`: Python bindings for Rust
+- `numpy`: NumPy array interface
+
+## Python Bindings Architecture
+
+### Design Principles
+
+1. **No Breaking Changes**: The Rust API remains completely unchanged. Python support is purely additive via the `python` feature flag.
+2. **Zero-Copy Data Transfer**: Uses rust-numpy for efficient data sharing between Python and Rust without copying.
+3. **Conditional Compilation**: All Python-specific code is behind `#[cfg(feature = "python")]` guards.
+
+### Structure
+
+- **src/python_bindings.rs**: All PyO3 wrapper code
+  - `PythonCarrier` class wraps the Rust `Carrier` struct
+  - Exposes `generate()` method that returns NumPy arrays
+  - Handles string-to-enum conversion for modulation types
+
+- **python/signal_kit/**: Python package wrapper
+  - Re-exports types from compiled `_signal_kit` module
+  - Provides convenience functions (e.g., `combine_carriers()`)
+  - Type hints via `py.typed` marker (PEP 561)
+
+- **pyproject.toml**: Maturin configuration for Python packaging
+
+### Python API
+
+```python
+import signal_kit
+import numpy as np
+
+# Create a carrier
+carrier = signal_kit.Carrier(
+    modulation="QPSK",
+    bandwidth=0.1,
+    center_freq=0.1,
+    snr_db=10.0,
+    rolloff=0.35,
+    sample_rate_hz=1e6,
+    seed=42
+)
+
+# Generate IQ samples (returns numpy array)
+iq = carrier.generate(1000)  # Returns np.ndarray[np.complex128]
+
+# Combine multiple carriers
+carrier2 = signal_kit.Carrier(...)
+iq2 = carrier2.generate(1000)
+combined = iq + iq2  # NumPy addition
+```
+
+### Data Transfer
+
+- **Input to Rust**: Python NumPy arrays are passed as read-only or read-write views
+- **Output from Rust**: Generated samples are transferred to Python with ownership, no copying of the actual data
+- **Supported Types**: `complex64` and `complex128` map to Rust's `Complex<f32>` and `Complex<f64>`
 
 ## Edition Note
 

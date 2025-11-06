@@ -16,9 +16,17 @@ mod ofdm_carrier;
 mod welch;
 mod carrier;
 
+#[cfg(feature = "python")]
+mod python_bindings;
+
 pub use carrier::Carrier;
 pub use complex_vec::ComplexVec;
 pub use mod_type::ModType;
+
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+
+// Don't define a pymodule here - it will be defined in python_bindings.rs instead
 
 #[cfg(test)]
 pub mod plot;
