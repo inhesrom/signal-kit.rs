@@ -3,6 +3,7 @@
 /// Enum representing different modulation types
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ModType {
+    _BPSK,
     _QPSK,
     _8PSK,
     _16APSK,
@@ -27,6 +28,7 @@ use super::ModType;
 
     /// Enum wrapper to hold any modulation type
     pub enum Modulation<T: Float> {
+        BPSK(_BPSK<T>),
         QPSK(_QPSK<T>),
         PSK8(_8PSK<T>),
         APSK16(_16APSK<T>),
@@ -37,6 +39,7 @@ use super::ModType;
 
     pub fn get_mod_type_from_enum<T: Float>(mod_enum: ModType) -> Modulation<T> {
         match mod_enum {
+            ModType::_BPSK => Modulation::BPSK(_BPSK::new(bpsk_map())),
             ModType::_QPSK => Modulation::QPSK(_QPSK::new(qpsk_gray_map())),
             ModType::_8PSK => Modulation::PSK8(_8PSK::new(psk8_gray_map())),
             ModType::_16APSK => Modulation::APSK16(_16APSK::new(apsk16_gray_map())),
@@ -50,6 +53,39 @@ use super::ModType;
         pub bits_per_symbol: usize,
         pub num_symbols: usize,
         pub bit_symbol_map: HashMap<u8, Complex<T>>,
+    }
+
+    pub struct _BPSK<T> {
+        mod_properties: ModProperties<T>
+    }
+
+    impl<T: Float> _BPSK<T> {
+        pub fn new(bit_symbol_map: HashMap<u8, Complex<T>>) -> Self {
+            _BPSK {
+                mod_properties: ModProperties {
+                    bits_per_symbol: 1,
+                    num_symbols: 2,
+                    bit_symbol_map
+                }
+            }
+        }
+    }
+
+    impl<T: Float> Modulate<T> for _BPSK<T> {
+        fn modulate(&self, bits: u8) -> Option<Complex<T>> {
+            self.mod_properties.bit_symbol_map.get(&bits).copied()
+        }
+
+        fn demodulate(&self, symbol: &Complex<T>) -> Option<u8> {
+            self.mod_properties.bit_symbol_map
+                .iter()
+                .min_by(|(_, s1), (_, s2)| {
+                    let d1 = (*s1 - *symbol).norm_sqr();
+                    let d2 = (*s2 - *symbol).norm_sqr();
+                    d1.partial_cmp(&d2).unwrap()
+                })
+                .map(|(bits, _)| *bits)
+        }
     }
 
     pub struct _QPSK<T> {
@@ -253,6 +289,32 @@ use super::ModType;
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn test_bpsk_modulate() {
+            let bpsk = _BPSK::<f64>::new(crate::symbol_maps::bpsk_map());
+
+            let symbol = bpsk.modulate(0b0).unwrap();
+            assert!(symbol.re > 0.0);
+            assert_eq!(symbol.im, 0.0);
+
+            let symbol = bpsk.modulate(0b1).unwrap();
+            assert!(symbol.re < 0.0);
+            assert_eq!(symbol.im, 0.0);
+        }
+
+        #[test]
+        fn test_bpsk_demodulate() {
+            let bpsk = _BPSK::<f64>::new(crate::symbol_maps::bpsk_map());
+
+            let symbol = bpsk.modulate(0b0).unwrap();
+            let bits = bpsk.demodulate(&symbol).unwrap();
+            assert_eq!(bits, 0b0);
+
+            let symbol = bpsk.modulate(0b1).unwrap();
+            let bits = bpsk.demodulate(&symbol).unwrap();
+            assert_eq!(bits, 0b1);
+        }
 
         #[test]
         fn test_qpsk_modulate() {

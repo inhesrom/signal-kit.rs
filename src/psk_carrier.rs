@@ -141,6 +141,15 @@ impl<T: Float> PskCarrier<T> {
         let mut symbols = Vec::new();
 
         match &self.modulation {
+            modulation::Modulation::BPSK(bpsk) => {
+                for _ in 0..count {
+                    let bit = self.bit_gen.next_bit();
+                    let bits = if bit { 1u8 } else { 0u8 };
+                    if let Some(symbol) = bpsk.modulate(bits) {
+                        symbols.push(symbol);
+                    }
+                }
+            },
             modulation::Modulation::QPSK(qpsk) => {
                 for _ in 0..count {
                     let bits = self.bit_gen.next_2_bits();

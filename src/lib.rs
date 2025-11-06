@@ -1,4 +1,5 @@
 mod fft;
+mod fft_interpolator;
 mod random_bit_generator;
 mod mod_type;
 mod symbol_mapper;
