@@ -1,0 +1,33 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "signal-kit"
+version = "0.1.0"
+description = "Digital Signal Processing library for communication systems with Python bindings"
+readme = "README.md"
+requires-python = ">=3.8"
+authors = [
+    { name = "Ian Hersom", email = "ian.hersom@gmail.com" }
+]
+keywords = ["signal-processing", "dsp", "communications", "modulation"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering",
+]
+
+[tool.maturin]
+features = ["python"]
+module-name = "signal_kit._signal_kit"
+python-source = "python"

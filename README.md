@@ -24,6 +24,8 @@ A Rust library for digital signal processing in communications systems.
 
 ## Quick Start
 
+### Rust
+
 ```bash
 # Build
 cargo build --release
@@ -36,6 +38,34 @@ cargo test symbol_mapper
 cargo test rrc_filter
 cargo test fft
 ```
+
+### Python
+
+Signal-kit now includes Python bindings! To get started:
+
+```bash
+# Run the automated setup script
+./scripts/setup_python_env.sh
+
+# Or manually set up:
+# 1. Create and activate virtual environment
+python3 -m venv .venv
+source .venv/bin/activate
+
+# 2. Install dependencies
+pip install maturin pytest numpy
+
+# 3. Build signal-kit
+maturin develop
+
+# 4. Use in Python
+python3 -c "import signal_kit; carrier = signal_kit.Carrier(...)"
+
+# 5. Run tests
+pytest tests/python/
+```
+
+See `scripts/README.md` for detailed setup instructions.
 
 ## Dependencies
 
