@@ -8,6 +8,7 @@ mod rrc_filter;
 mod complex_vec;
 mod vector_ops;
 mod cw;
+mod awgn;
 mod psk_carrier;
 mod ofdm_carrier;
 
