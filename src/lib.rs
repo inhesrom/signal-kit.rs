@@ -9,3 +9,6 @@ mod vector_ops;
 mod cw;
 mod psk_carrier;
 mod ofdm_carrier;
+
+#[cfg(test)]
+pub mod plot;

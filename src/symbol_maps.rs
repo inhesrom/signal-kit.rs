@@ -325,8 +325,8 @@ mod tests {
     #[test]
     fn test_qpsk_constellation_plot() {
         use std::env;
-        use plotly::{Plot, Scatter};
-        use plotly::common::Mode;
+        use crate::random_bit_generator::BitGenerator;
+        use crate::plot::plot_constellation;
 
         let plot = env::var("TEST_PLOT").unwrap_or_else(|_| "false".to_string());
         if plot.to_lowercase() != "true" {
@@ -334,59 +334,22 @@ mod tests {
             return;
         }
 
+        // Get QPSK constellation map
         let map = qpsk_gray_map::<f64>();
 
-        // Extract I and Q values with labels
-        let mut i_vals = Vec::new();
-        let mut q_vals = Vec::new();
-        let mut labels = Vec::new();
+        // Generate actual QPSK symbols
+        let mut bit_gen = BitGenerator::new_from_seed(42);
+        let num_symbols = 1000;
+        let mut symbols = Vec::with_capacity(num_symbols);
 
-        for bits in 0..4u8 {
+        for _ in 0..num_symbols {
+            let bits = bit_gen.next_2_bits();
             if let Some(symbol) = map.get(&bits) {
-                i_vals.push(symbol.re);
-                q_vals.push(symbol.im);
-                labels.push(format!("{:02b}", bits));
+                symbols.push(*symbol);
             }
         }
 
-        // Create scatter plot
-        let trace = Scatter::new(i_vals.clone(), q_vals.clone())
-            .mode(Mode::Markers)
-            .text_array(labels)
-            .name("QPSK Constellation");
-
-        let mut plot = Plot::new();
-        plot.add_trace(trace);
-
-        // Add axis lines at 0
-        let x_axis_line = Scatter::new(vec![-1.0, 1.0], vec![0.0, 0.0])
-            .mode(Mode::Lines)
-            .name("I-axis")
-            .show_legend(false);
-        let y_axis_line = Scatter::new(vec![0.0, 0.0], vec![-1.0, 1.0])
-            .mode(Mode::Lines)
-            .name("Q-axis")
-            .show_legend(false);
-
-        plot.add_trace(x_axis_line);
-        plot.add_trace(y_axis_line);
-
-        // Set layout
-        use plotly::Layout;
-        let layout = Layout::new()
-            .title("QPSK Constellation Diagram")
-            .x_axis(plotly::layout::Axis::new().title("In-Phase (I)"))
-            .y_axis(plotly::layout::Axis::new().title("Quadrature (Q)"));
-        plot.set_layout(layout);
-
-        println!("\nQPSK Constellation Points:");
-        for bits in 0..4u8 {
-            if let Some(symbol) = map.get(&bits) {
-                println!("Bits {:02b}: I={:.4}, Q={:.4}, Magnitude={:.4}",
-                    bits, symbol.re, symbol.im, symbol.norm());
-            }
-        }
-
-        plot.show();
+        // Plot the constellation using the utility function
+        plot_constellation(&symbols, "QPSK Constellation");
     }
 }
