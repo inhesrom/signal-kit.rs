@@ -3,7 +3,7 @@
 use pyo3::prelude::*;
 use numpy::{PyArray1, IntoPyArray};
 use num_complex::Complex;
-use crate::{Carrier, ModType};
+use crate::{Carrier, Channel, ModType};
 
 /// Helper function to parse modulation type from string
 fn parse_modulation(mod_str: &str) -> PyResult<ModType> {
@@ -105,7 +105,7 @@ impl PythonCarrier {
         })
     }
 
-    /// Generate IQ samples from the carrier
+    /// Generate IQ samples from the carrier with noise
     ///
     /// Parameters:
     ///     num_samples (int): Number of samples to generate
@@ -124,12 +124,150 @@ impl PythonCarrier {
         let array = vec.into_pyarray_bound(py);
         array.into()
     }
+
+    /// Generate clean IQ samples without noise
+    ///
+    /// Useful for multi-carrier scenarios where noise is added to the combined signal.
+    ///
+    /// Parameters:
+    ///     num_samples (int): Number of samples to generate
+    ///
+    /// Returns:
+    ///     numpy.ndarray: Complex-valued IQ samples as numpy array (complex128)
+    fn generate_clean(&self, py: Python, num_samples: usize) -> Py<PyArray1<Complex<f64>>> {
+        let samples = self.inner.generate_clean::<f64>(num_samples);
+
+        // Convert ComplexVec to Vec<Complex<f64>>
+        let vec: Vec<Complex<f64>> = (0..samples.len())
+            .map(|i| samples[i])
+            .collect();
+
+        // Transfer ownership to Python
+        let array = vec.into_pyarray_bound(py);
+        array.into()
+    }
+}
+
+/// Python wrapper for the Channel struct
+///
+/// Manages multiple carriers combined into a single channel with shared AWGN.
+/// Noise is added once to the combined signal, modeling realistic transponder scenarios.
+///
+/// Example:
+///     >>> import signal_kit
+///     >>> carrier1 = signal_kit.Carrier("QPSK", 0.1, 0.1, 10.0, 0.35, 1e6, seed=42)
+///     >>> carrier2 = signal_kit.Carrier("QPSK", 0.1, -0.1, 10.0, 0.35, 1e6, seed=43)
+///     >>> channel = signal_kit.Channel([carrier1, carrier2])
+///     >>> channel.set_noise_floor_db(-100.0)
+///     >>> iq_combined = channel.generate(10000)
+#[pyclass(name = "Channel")]
+pub struct PythonChannel {
+    inner: Channel,
+}
+
+#[pymethods]
+impl PythonChannel {
+    #[new]
+    fn new(carriers: Vec<PyRef<PythonCarrier>>) -> PyResult<Self> {
+        let rust_carriers: Vec<Carrier> = carriers
+            .into_iter()
+            .map(|c| c.inner.clone())
+            .collect();
+
+        if rust_carriers.is_empty() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Channel must have at least one carrier",
+            ));
+        }
+
+        Ok(PythonChannel {
+            inner: Channel::new(rust_carriers),
+        })
+    }
+
+    /// Set the noise floor in dB
+    ///
+    /// Parameters:
+    ///     noise_floor_db (float): Noise floor in dB (e.g., -100.0)
+    fn set_noise_floor_db(&mut self, noise_floor_db: f64) {
+        self.inner.set_noise_floor_db(noise_floor_db);
+    }
+
+    /// Set the noise floor in linear units
+    ///
+    /// Parameters:
+    ///     noise_floor_linear (float): Noise floor as a linear power value
+    fn set_noise_floor_linear(&mut self, noise_floor_linear: f64) -> PyResult<()> {
+        if noise_floor_linear <= 0.0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "noise_floor_linear must be positive",
+            ));
+        }
+        self.inner.set_noise_floor_linear(noise_floor_linear);
+        Ok(())
+    }
+
+    /// Set the seed for reproducible AWGN generation
+    ///
+    /// Parameters:
+    ///     seed (int): Seed value for the AWGN random number generator
+    fn set_seed(&mut self, seed: u64) {
+        self.inner.set_seed(seed);
+    }
+
+    /// Generate combined carrier signal with shared AWGN
+    ///
+    /// Parameters:
+    ///     num_samples (int): Number of samples to generate
+    ///
+    /// Returns:
+    ///     numpy.ndarray: Complex-valued IQ samples as numpy array (complex128)
+    fn generate(&self, py: Python, num_samples: usize) -> PyResult<Py<PyArray1<Complex<f64>>>> {
+        let samples = self.inner.generate::<f64>(num_samples);
+
+        // Convert ComplexVec to Vec<Complex<f64>>
+        let vec: Vec<Complex<f64>> = (0..samples.len())
+            .map(|i| samples[i])
+            .collect();
+
+        // Transfer ownership to Python
+        let array = vec.into_pyarray_bound(py);
+        Ok(array.into())
+    }
+
+    /// Generate combined carrier signal without noise
+    ///
+    /// Useful for analysis or when you want to add noise separately.
+    ///
+    /// Parameters:
+    ///     num_samples (int): Number of samples to generate
+    ///
+    /// Returns:
+    ///     numpy.ndarray: Complex-valued IQ samples as numpy array (complex128)
+    fn generate_clean(&self, py: Python, num_samples: usize) -> Py<PyArray1<Complex<f64>>> {
+        let samples = self.inner.generate_clean::<f64>(num_samples);
+
+        // Convert ComplexVec to Vec<Complex<f64>>
+        let vec: Vec<Complex<f64>> = (0..samples.len())
+            .map(|i| samples[i])
+            .collect();
+
+        // Transfer ownership to Python
+        let array = vec.into_pyarray_bound(py);
+        array.into()
+    }
+
+    /// Get the number of carriers in this channel
+    fn num_carriers(&self) -> usize {
+        self.inner.num_carriers()
+    }
 }
 
 /// Initialize the Python module
 #[pymodule]
 fn _signal_kit(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PythonCarrier>()?;
+    m.add_class::<PythonChannel>()?;
     m.add("__version__", "0.1.0")?;
 
     Ok(())

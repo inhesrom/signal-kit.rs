@@ -25,6 +25,7 @@ use num_traits::Float;
 /// );
 /// let iq_samples = carrier.generate(1000);
 /// ```
+#[derive(Clone)]
 pub struct Carrier {
     modulation: ModType,
     bandwidth: f64,              // Normalized 0.0-1.0 (occupied_bw / sample_rate)
@@ -81,14 +82,17 @@ impl Carrier {
         }
     }
 
-    /// Generate a specified number of samples from this carrier
+    /// Generate a specified number of clean samples (without noise) from this carrier
+    ///
+    /// This method generates the signal without adding AWGN, useful for multi-carrier
+    /// scenarios where noise is added once to the combined signal.
     ///
     /// # Arguments
     /// * `num_samples` - Number of samples to generate
     ///
     /// # Returns
-    /// ComplexVec<T> containing the generated samples
-    pub fn generate<T: Float>(&self, num_samples: usize) -> ComplexVec<T> {
+    /// ComplexVec<T> containing the generated samples without noise
+    pub fn generate_clean<T: Float>(&self, num_samples: usize) -> ComplexVec<T> {
         // Calculate symbol rate from bandwidth
         // bandwidth = (symbol_rate * (1 + rolloff)) / sample_rate
         // symbol_rate = (bandwidth * sample_rate) / (1 + rolloff)
@@ -111,6 +115,22 @@ impl Carrier {
             let freq_offset_hz = self.center_freq * self.sample_rate_hz;
             iq_samples.freq_shift(freq_offset_hz, self.sample_rate_hz);
         }
+
+        iq_samples
+    }
+
+    /// Generate a specified number of samples from this carrier with noise added
+    ///
+    /// This method is suitable for single-carrier scenarios. For multi-carrier scenarios,
+    /// use `generate_clean()` and combine carriers before adding noise via a Channel.
+    ///
+    /// # Arguments
+    /// * `num_samples` - Number of samples to generate
+    ///
+    /// # Returns
+    /// ComplexVec<T> containing the generated samples with AWGN
+    pub fn generate<T: Float>(&self, num_samples: usize) -> ComplexVec<T> {
+        let iq_samples = self.generate_clean::<T>(num_samples);
 
         // Measure signal power
         let signal_power = self.measure_power(&iq_samples);
@@ -181,6 +201,11 @@ impl Carrier {
             sum_power += power;
         }
         sum_power / signal.len() as f64
+    }
+
+    /// Get the sample rate in Hz
+    pub fn get_sample_rate(&self) -> f64 {
+        self.sample_rate_hz
     }
 }
 

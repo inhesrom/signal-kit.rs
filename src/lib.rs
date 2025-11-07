@@ -15,11 +15,13 @@ mod fsk_carrier;
 mod ofdm_carrier;
 mod welch;
 mod carrier;
+mod channel;
 
 #[cfg(feature = "python")]
 mod python_bindings;
 
 pub use carrier::Carrier;
+pub use channel::Channel;
 pub use complex_vec::ComplexVec;
 pub use mod_type::ModType;
 

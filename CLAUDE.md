@@ -108,6 +108,39 @@ The `main.rs` demonstrates a typical signal generation pipeline:
 
 Note: The RRC filter is implemented but not yet integrated into the main pipeline.
 
+### Multi-Carrier and Channel Simulation
+
+The library includes specialized support for transponder/channel simulation with multiple carriers:
+
+**Single Carrier (Original Behavior)**:
+- Use `Carrier::generate()` to generate signal with noise included
+- SNR is applied per-carrier before any combination
+
+**Multi-Carrier with Shared AWGN (New - Recommended for Channels)**:
+- Use `Carrier::generate_clean()` to generate carriers without noise
+- Combine multiple carriers using `Channel` struct
+- Noise is added once to the combined signal (realistic channel model)
+- Each carrier's SNR in the combined signal is determined by: SNR_i = P_i / N₀
+  - Where P_i is carrier i's signal power and N₀ is the shared noise floor
+
+**Workflow Comparison**:
+
+*Old approach (not recommended for channels)*:
+```rust
+carrier1 = signal1 + noise1  // SNR₁ is per-carrier
+carrier2 = signal2 + noise2  // SNR₂ is per-carrier
+combined = carrier1 + carrier2  // Has noise1 + noise2 (unrealistic)
+```
+
+*New approach (recommended for transponder simulation)*:
+```rust
+let mut channel = Channel::new(vec![carrier1, carrier2]);
+channel.set_noise_floor_db(-100.0);  // Set shared noise floor
+combined = channel.generate(num_samples);  // Only one AWGN source added
+```
+
+**Key Design Decision**: The noise floor approach allows multiple carriers with different modulations and bandwidths to coexist in a realistic channel. Each carrier's SNR is determined by its power and the shared noise floor.
+
 ## Dependencies
 
 - `rustfft`: FFT operations (though not currently used in visible code)
@@ -135,7 +168,11 @@ When the `python` feature is enabled:
 
 - **src/python_bindings.rs**: All PyO3 wrapper code
   - `PythonCarrier` class wraps the Rust `Carrier` struct
-  - Exposes `generate()` method that returns NumPy arrays
+    - Exposes `generate()` for signal with noise
+    - Exposes `generate_clean()` for noise-free signal
+  - `PythonChannel` class wraps the Rust `Channel` struct
+    - Manages multiple carriers with shared AWGN
+    - Methods: `set_noise_floor_db()`, `set_noise_floor_linear()`, `set_seed()`, `generate()`, `generate_clean()`
   - Handles string-to-enum conversion for modulation types
 
 - **python/signal_kit/**: Python package wrapper
@@ -147,6 +184,7 @@ When the `python` feature is enabled:
 
 ### Python API
 
+**Single Carrier (Simple Case)**:
 ```python
 import signal_kit
 import numpy as np
@@ -162,13 +200,61 @@ carrier = signal_kit.Carrier(
     seed=42
 )
 
-# Generate IQ samples (returns numpy array)
+# Generate IQ samples with noise (returns numpy array)
 iq = carrier.generate(1000)  # Returns np.ndarray[np.complex128]
+```
 
-# Combine multiple carriers
+**Multi-Carrier with Shared AWGN (Channel Simulation)**:
+```python
+import signal_kit
+import numpy as np
+
+# Create multiple carriers
+carrier1 = signal_kit.Carrier(
+    modulation="QPSK",
+    bandwidth=0.1,
+    center_freq=0.1,
+    snr_db=10.0,  # Target SNR in combined channel (informational)
+    rolloff=0.35,
+    sample_rate_hz=1e6,
+    seed=42
+)
+
+carrier2 = signal_kit.Carrier(
+    modulation="8PSK",
+    bandwidth=0.15,
+    center_freq=-0.15,
+    snr_db=15.0,
+    rolloff=0.35,
+    sample_rate_hz=1e6,
+    seed=43
+)
+
+# Create a channel with multiple carriers
+channel = signal_kit.Channel([carrier1, carrier2])
+
+# Set the noise floor in dB (determines SNR of all carriers)
+channel.set_noise_floor_db(-100.0)
+
+# Generate combined signal with shared AWGN
+iq_combined = channel.generate(10000)  # Returns np.ndarray[np.complex128]
+
+# Alternatively, generate clean signals without noise
+iq_clean = channel.generate_clean(10000)
+```
+
+**Using clean generation for custom noise addition**:
+```python
+# Generate clean carriers and combine
+carrier1 = signal_kit.Carrier(...)
+iq1_clean = carrier1.generate_clean(1000)
+
 carrier2 = signal_kit.Carrier(...)
-iq2 = carrier2.generate(1000)
-combined = iq + iq2  # NumPy addition
+iq2_clean = carrier2.generate_clean(1000)
+
+# Custom combination and noise addition
+combined_clean = iq1_clean + iq2_clean
+# ... add your own AWGN using scipy.signal or custom implementation
 ```
 
 ### Data Transfer

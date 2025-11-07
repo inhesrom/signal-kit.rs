@@ -37,10 +37,10 @@ Example:
     >>> combined = iq_samples + iq2  # Simulate multiple signals in a channel
 """
 
-from ._signal_kit import Carrier
+from ._signal_kit import Carrier, Channel
 
 __version__ = "0.1.0"
-__all__ = ["Carrier"]
+__all__ = ["Carrier", "Channel"]
 
 
 def combine_carriers(*carrier_arrays):
