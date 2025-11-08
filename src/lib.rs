@@ -2,7 +2,6 @@ mod fft;
 mod fft_interpolator;
 mod random_bit_generator;
 mod mod_type;
-mod symbol_mapper;
 mod symbol_maps;
 mod rrc_filter;
 mod complex_vec;
