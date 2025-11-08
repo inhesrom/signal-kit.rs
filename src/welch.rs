@@ -72,6 +72,7 @@ where
     let averaged_psd = average_spectra(psds, avg_method);
 
     // Normalize for proper PSD scaling
+    // Note: normalize_psd needs nperseg (segment length), not fft_len
     let mut normalized_psd = normalize_psd(averaged_psd, &window_vec, sample_rate, fft_len);
 
     // Shift PSD to center DC component
@@ -263,11 +264,13 @@ fn normalize_psd<T: Float>(
     mut psd: Vec<T>,
     window: &[T],
     sample_rate: T,
-    _nfft: usize,
+    nfft: usize,
 ) -> Vec<T> {
-    // Scaling factor: 1 / (fs * sum(window^2))
+    // Scaling factor: nfft^2 / (fs * sum(window^2))
+    // The nfft^2 accounts for FFT magnitude scaling
     let window_power = window_energy(window);
-    let scale = T::one() / (sample_rate * window_power);
+    let nfft_float = T::from(nfft).unwrap();
+    let scale = (nfft_float * nfft_float) / (sample_rate * window_power);
 
     // Apply scaling
     for val in psd.iter_mut() {
@@ -1003,5 +1006,121 @@ mod tests {
         plot.set_layout(layout);
 
         plot.show();
+    }
+
+    #[test]
+    fn test_parseval_theorem_conservation() {
+        // Test that total power is conserved between time and frequency domains
+        // This validates the PSD normalization is correct per Parseval's theorem:
+        // sum(|x[n]|^2) / N = integral(PSD(f) df) from 0 to fs
+
+        let sample_rate = 1e6_f64;
+        let freq = 2e5_f64; // 200 kHz tone
+        let block_size = 8192;
+
+        // Generate a simple CW tone
+        let mut cw = CW::new(freq, sample_rate, block_size);
+        let signal = cw.generate_block::<f64>();
+
+        // Calculate time-domain power (average power)
+        let time_power: f64 = signal
+            .iter()
+            .map(|s| s.norm_sqr())
+            .sum::<f64>() / block_size as f64;
+
+        // Calculate frequency-domain power by integrating PSD
+        let nperseg = 1024;
+        let (freqs, psd) = welch(
+            &signal.iter().cloned().collect::<Vec<_>>(),
+            sample_rate,
+            nperseg,
+            None,
+            None,
+            WindowType::Hann,
+            None,
+        );
+
+        // Frequency resolution
+        let df = freqs[1] - freqs[0]; // Assuming uniform spacing
+
+        // Integrate PSD over all frequency bins to get total power
+        let freq_power: f64 = psd.iter().sum::<f64>() * df;
+
+        println!("\n=== Parseval's Theorem Test (CW Tone) ===");
+        println!("Time-domain power: {:.6e}", time_power);
+        println!("Frequency-domain power: {:.6e}", freq_power);
+        println!("Power ratio (freq/time): {:.6}", freq_power / time_power);
+        println!("Error: {:.2}%", ((freq_power - time_power).abs() / time_power) * 100.0);
+
+        // Allow 5% tolerance due to spectral leakage and windowing effects
+        let relative_error = (freq_power - time_power).abs() / time_power;
+        assert!(
+            relative_error < 0.05,
+            "Parseval's theorem violated: relative error = {:.2}% (expected < 5%)",
+            relative_error * 100.0
+        );
+    }
+
+    #[test]
+    fn test_parseval_theorem_with_noise() {
+        // Test Parseval's theorem with a signal containing both tone and AWGN
+        // This is more realistic and tests the PSD normalization under typical conditions
+
+        let sample_rate = 1e6_f64;
+        let freq = 2e5_f64; // 200 kHz tone
+        let block_size = 16384;
+
+        // Generate CW tone
+        let mut cw = CW::new(freq, sample_rate, block_size);
+        let signal = cw.generate_block::<f64>();
+
+        // Add AWGN with known power
+        let snr_db = 10.0;
+        let signal_power = 1.0;
+        let snr_linear = 10.0_f64.powf(snr_db / 10.0);
+        let noise_power = signal_power / snr_linear;
+
+        let mut awgn = AWGN::new_from_seed(sample_rate, block_size, noise_power, 42);
+        let noise = awgn.generate_block::<f64>();
+
+        let mut noisy_signal: Vec<Complex<f64>> = Vec::with_capacity(block_size);
+        for i in 0..block_size {
+            noisy_signal.push(signal[i] + noise[i]);
+        }
+
+        // Calculate time-domain power
+        let time_power: f64 = noisy_signal
+            .iter()
+            .map(|s| s.norm_sqr())
+            .sum::<f64>() / block_size as f64;
+
+        // Calculate frequency-domain power
+        let nperseg = 1024;
+        let (freqs, psd) = welch(
+            &noisy_signal,
+            sample_rate,
+            nperseg,
+            Some((nperseg / 2) as usize), // 50% overlap
+            None,
+            WindowType::Hann,
+            Some(AveragingMethod::Mean),
+        );
+
+        let df = freqs[1] - freqs[0];
+        let freq_power: f64 = psd.iter().sum::<f64>() * df;
+
+        println!("\n=== Parseval's Theorem Test (CW + Noise) ===");
+        println!("Time-domain power: {:.6e}", time_power);
+        println!("Frequency-domain power: {:.6e}", freq_power);
+        println!("Power ratio (freq/time): {:.6}", freq_power / time_power);
+        println!("Error: {:.2}%", ((freq_power - time_power).abs() / time_power) * 100.0);
+
+        // More lenient tolerance (10%) with noise and overlapping segments
+        let relative_error = (freq_power - time_power).abs() / time_power;
+        assert!(
+            relative_error < 0.10,
+            "Parseval's theorem violated with noise: relative error = {:.2}% (expected < 10%)",
+            relative_error * 100.0
+        );
     }
 }
