@@ -163,7 +163,7 @@ impl Carrier {
             self.modulation,
             T::from(self.rolloff).unwrap(),
             block_size,
-            128, // Default filter taps
+            91, // Default filter taps
             self.seed,
         );
 
@@ -194,13 +194,12 @@ impl Carrier {
 
     /// Measure the average power of a signal
     fn measure_power<T: Float>(&self, signal: &ComplexVec<T>) -> f64 {
-        let mut sum_power = 0.0;
+        let mut sum_power = T::from(0.0).unwrap();
         for sample in signal.iter() {
-            let power = (sample.re.to_f64().unwrap()).powi(2)
-                + (sample.im.to_f64().unwrap()).powi(2);
-            sum_power += power;
+            let power = (sample.re * sample.re) + (sample.im * sample.im);
+            sum_power = sum_power + power;
         }
-        sum_power / signal.len() as f64
+        sum_power.to_f64().unwrap() / (signal.len() as f64)
     }
 
     /// Get the sample rate in Hz
