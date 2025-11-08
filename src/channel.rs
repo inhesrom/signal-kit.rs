@@ -404,8 +404,8 @@ mod tests {
         // Step 3: Generate clean carriers and measure their unscaled powers
         let clean1_unscaled = carrier1.generate_clean::<f64>(num_samples);
         let clean2_unscaled = carrier2.generate_clean::<f64>(num_samples);
-        let power1_unscaled = measure_signal_power(&clean1_unscaled);
-        let power2_unscaled = measure_signal_power(&clean2_unscaled);
+        let power1_unscaled = clean1_unscaled.measure_power(Some(1.0f64/carrier1.bandwidth));
+        let power2_unscaled = clean2_unscaled.measure_power(Some(1.0f64/carrier2.bandwidth));
 
         println!("Carrier 1 unscaled power: {:.6} dB", 10.0 * power1_unscaled.log10());
         println!("Carrier 2 unscaled power: {:.6} dB", 10.0 * power2_unscaled.log10());
@@ -425,8 +425,8 @@ mod tests {
         }
 
         // Step 6: Verify actual powers after scaling
-        let power1 = measure_signal_power(&clean1);
-        let power2 = measure_signal_power(&clean2);
+        let power1 = clean1.measure_power(None);
+        let power2 = clean2.measure_power(None);
 
         println!("\nActual scaled carrier powers:");
         println!("Carrier 1 power: {:.6} dB", 10.0 * power1.log10());
@@ -457,7 +457,7 @@ mod tests {
 
         let mut awgn = AWGN::new_from_seed(sample_rate, num_samples, noise_power, 999);
         let noise = awgn.generate_block::<f64>();
-        let actual_noise_power = measure_signal_power(&noise);
+        let actual_noise_power = noise.measure_power(None);
         let combined = combined_clean + noise;
 
         // Verify actual SNR using measured noise power
@@ -494,14 +494,4 @@ mod tests {
         }
     }
 
-    /// Helper function to measure signal power
-    fn measure_signal_power<T: num_traits::Float>(signal: &crate::complex_vec::ComplexVec<T>) -> f64 {
-        let mut sum_power = 0.0;
-        for sample in signal.iter() {
-            let power = (sample.re.to_f64().unwrap()).powi(2)
-                + (sample.im.to_f64().unwrap()).powi(2);
-            sum_power += power;
-        }
-        sum_power / signal.len() as f64
-    }
 }

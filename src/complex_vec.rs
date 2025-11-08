@@ -169,6 +169,22 @@ where
             *sample = *sample * rotator;
         }
     }
+
+    /// Measure the average power of a signal
+    ///
+    /// # Arguments
+    /// * `oversample_rate` - the rate at which the signal/carrier in band is oversampled at. i.e.
+    /// 1000e3 sample_rate, 500e3 carrier bandwidth = 2.0 oversample_rate
+    pub fn measure_power(&self, oversample_rate: Option<f64>) -> f64 {
+        let mut sum_power = T::from(0.0).unwrap();
+        for sample in self.vector.iter() {
+            let power = (sample.re * sample.re) + (sample.im * sample.im);
+            sum_power = sum_power + power;
+        }
+        let factor = oversample_rate.unwrap_or(1.0_f64);
+        sum_power.to_f64().unwrap() / ((self.vector.len() as f64) / factor)
+    }
+
 }
 
 impl<T> Index<usize> for ComplexVec<T>

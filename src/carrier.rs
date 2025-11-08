@@ -27,13 +27,13 @@ use num_traits::Float;
 /// ```
 #[derive(Clone)]
 pub struct Carrier {
-    modulation: ModType,
-    bandwidth: f64,              // Normalized 0.0-1.0 (occupied_bw / sample_rate)
-    center_freq: f64,            // Normalized -0.5 to 0.5
-    snr_db: f64,                 // Target SNR in dB
-    rolloff: f64,                // RRC rolloff factor (0.0-1.0)
-    sample_rate_hz: f64,         // Sample rate in Hz
-    seed: Option<u64>,           // Optional seed for reproducibility
+    pub modulation: ModType,
+    pub bandwidth: f64,              // Normalized 0.0-1.0 (occupied_bw / sample_rate)
+    pub center_freq: f64,            // Normalized -0.5 to 0.5
+    pub snr_db: f64,                 // Target SNR in dB
+    pub rolloff: f64,                // RRC rolloff factor (0.0-1.0)
+    pub sample_rate_hz: f64,         // Sample rate in Hz
+    pub seed: Option<u64>,           // Optional seed for reproducibility
 }
 
 impl Carrier {
@@ -134,7 +134,7 @@ impl Carrier {
 
         // Measure signal power
         let oversample_rate = 1.0_f64 / self.bandwidth;
-        let signal_power = self.measure_power(&iq_samples, oversample_rate);
+        let signal_power = iq_samples.measure_power(Some(oversample_rate));
 
         // Add AWGN to achieve target SNR
         // SNR_dB = 10 * log10(signal_power / noise_power)
@@ -191,16 +191,6 @@ impl Carrier {
         let mut cw = CW::new(0.0, self.sample_rate_hz, num_samples);
         let samples = cw.generate_block::<T>();
         ComplexVec::from_vec(samples)
-    }
-
-    /// Measure the average power of a signal
-    fn measure_power<T: Float>(&self, signal: &ComplexVec<T>, oversample_rate: f64) -> f64 {
-        let mut sum_power = T::from(0.0).unwrap();
-        for sample in signal.iter() {
-            let power = (sample.re * sample.re) + (sample.im * sample.im);
-            sum_power = sum_power + power;
-        }
-        sum_power.to_f64().unwrap() / ((signal.len() as f64) / oversample_rate)
     }
 
     /// Get the sample rate in Hz
@@ -384,11 +374,13 @@ mod tests {
     fn test_carrier_awgn() {
         use num_complex::Complex;
         use crate::vector_ops;
+        use std::env;
+
         let carrier = Carrier::new(ModType::_QPSK, 0.25, 0.0, 10.0, 0.15, 1e6, Some(0));
         let oversample_rate = 1.0f64 / carrier.bandwidth;
         let signal_iq = carrier.generate_clean(100_000);
 
-        let carrier_power_linear = carrier.measure_power(&signal_iq, oversample_rate);
+        let carrier_power_linear = signal_iq.measure_power(Some(oversample_rate));
         let desired_carrier_snr_linear = 10_f64.powf(carrier.snr_db / 10.0);
         let required_noise_power_linear = carrier_power_linear / desired_carrier_snr_linear;
         let mut awgn = AWGN::new_from_seed(1e6, 100_000, required_noise_power_linear, 0);
@@ -398,6 +390,9 @@ mod tests {
         let slice: &[Complex<f32>] = &channel_iq;
         let (freqs, spectrum) = welch(slice, 1e6, 2048, Some(512), Some(2048), crate::window::WindowType::Rectangular, Some(AveragingMethod::Median));
 
-        plot_spectrum(&freqs, &vector_ops::to_db(&spectrum), "SNR Comparison");
+        let plot = env::var("TEST_PLOT").unwrap_or_else(|_| "false".to_string());
+        if plot.to_lowercase() == "true" {
+            plot_spectrum(&freqs, &vector_ops::to_db(&spectrum), "SNR Comparison");
+        }
     }
 }
