@@ -210,6 +210,8 @@ impl Carrier {
 
 #[cfg(test)]
 mod tests {
+    use crate::{plot::plot_spectrum, welch::{AveragingMethod, welch}};
+
     use super::*;
 
     #[test]
@@ -375,5 +377,25 @@ mod tests {
 
         // Plot Welch PSD
         plot_spectrum(&freqs, &psd_db, "Two Carrier PSD (Welch Method)");
+    }
+
+    #[test]
+    fn test_carrier_awgn() {
+        use num_complex::Complex;
+        use crate::vector_ops;
+        let carrier = Carrier::new(ModType::_QPSK, 0.25, 0.0, -5.0, 0.15, 1e6, Some(0));
+        let signal_iq = carrier.generate_clean(100_000);
+
+        let carrier_power_linear = carrier.measure_power(&signal_iq);
+        let desired_carrier_snr_linear = 10_f64.powf(carrier.snr_db / 10.0);
+        let required_noise_power_linear = carrier_power_linear / desired_carrier_snr_linear;
+        let mut awgn = AWGN::new_from_seed(1e6, 100_000, required_noise_power_linear, 0);
+        let awgn_iq = awgn.generate_block();
+
+        let channel_iq: ComplexVec<f32> = signal_iq + awgn_iq;
+        let slice: &[Complex<f32>] = &channel_iq;
+        let (freqs, spectrum) = welch(slice, 1e6, 2048, Some(512), Some(2048), crate::window::WindowType::Rectangular, Some(AveragingMethod::Median));
+
+        plot_spectrum(&freqs, &vector_ops::to_db(&spectrum), "SNR Comparison");
     }
 }
