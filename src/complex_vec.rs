@@ -2,7 +2,7 @@
 
 use num_complex::{Complex};
 use num_traits::Float;
-use std::ops::{Index, IndexMut, Add, Sub};
+use std::ops::{Index, IndexMut, Add, Sub, Deref};
 
 /// Convolution mode
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -188,6 +188,17 @@ where
 {
     fn index_mut(&mut self, idx: usize) -> &mut Self::Output {
         &mut self.vector[idx]
+    }
+}
+
+impl<T> Deref for ComplexVec<T>
+where
+    T: Float,
+{
+    type Target = [Complex<T>];
+
+    fn deref(&self) -> &Self::Target {
+        &self.vector
     }
 }
 
