@@ -133,7 +133,8 @@ impl Carrier {
         let iq_samples = self.generate_clean::<T>(num_samples);
 
         // Measure signal power
-        let signal_power = self.measure_power(&iq_samples);
+        let oversample_rate = 1.0_f64 / self.bandwidth;
+        let signal_power = self.measure_power(&iq_samples, oversample_rate);
 
         // Add AWGN to achieve target SNR
         // SNR_dB = 10 * log10(signal_power / noise_power)
@@ -193,13 +194,13 @@ impl Carrier {
     }
 
     /// Measure the average power of a signal
-    fn measure_power<T: Float>(&self, signal: &ComplexVec<T>) -> f64 {
+    fn measure_power<T: Float>(&self, signal: &ComplexVec<T>, oversample_rate: f64) -> f64 {
         let mut sum_power = T::from(0.0).unwrap();
         for sample in signal.iter() {
             let power = (sample.re * sample.re) + (sample.im * sample.im);
             sum_power = sum_power + power;
         }
-        sum_power.to_f64().unwrap() / (signal.len() as f64)
+        sum_power.to_f64().unwrap() / ((signal.len() as f64) / oversample_rate)
     }
 
     /// Get the sample rate in Hz
@@ -383,10 +384,11 @@ mod tests {
     fn test_carrier_awgn() {
         use num_complex::Complex;
         use crate::vector_ops;
-        let carrier = Carrier::new(ModType::_QPSK, 0.25, 0.0, -5.0, 0.15, 1e6, Some(0));
+        let carrier = Carrier::new(ModType::_QPSK, 0.25, 0.0, 10.0, 0.15, 1e6, Some(0));
+        let oversample_rate = 1.0f64 / carrier.bandwidth;
         let signal_iq = carrier.generate_clean(100_000);
 
-        let carrier_power_linear = carrier.measure_power(&signal_iq);
+        let carrier_power_linear = carrier.measure_power(&signal_iq, oversample_rate);
         let desired_carrier_snr_linear = 10_f64.powf(carrier.snr_db / 10.0);
         let required_noise_power_linear = carrier_power_linear / desired_carrier_snr_linear;
         let mut awgn = AWGN::new_from_seed(1e6, 100_000, required_noise_power_linear, 0);
