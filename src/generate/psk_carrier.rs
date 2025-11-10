@@ -3,8 +3,8 @@
 use crate::mod_type::*;
 use crate::mod_type::modulation::Modulate;
 use crate::complex_vec::{ComplexVec, ConvMode};
-use crate::random_bit_generator::BitGenerator;
-use crate::rrc_filter::RRCFilter;
+use crate::generate::random_bit_generator::BitGenerator;
+use crate::filter::rrc_filter::RRCFilter;
 use num_traits::Float;
 
 pub struct PskCarrier<T: Float> {

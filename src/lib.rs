@@ -1,34 +1,30 @@
-mod fft;
-mod fft_interpolator;
-mod random_bit_generator;
-mod mod_type;
-mod symbol_maps;
-mod rrc_filter;
-mod complex_vec;
-mod vector_ops;
-mod window;
-mod cw;
-mod awgn;
-mod psk_carrier;
-mod fsk_carrier;
-mod ofdm_carrier;
-mod welch;
-mod carrier;
-mod channel;
-mod impairment;
+// Core data structures and utilities
+pub mod complex_vec;
+pub mod fft;
+pub mod mod_type;
+pub mod symbol_maps;
+pub mod vector_ops;
+pub mod vector_simd;
 
+// Organized modules
+pub mod filter;
+pub mod generate;
+pub mod spectrum;
+
+// Python bindings (conditional)
 #[cfg(feature = "python")]
 mod python_bindings;
 
-pub use carrier::Carrier;
-pub use channel::Channel;
+// Public re-exports for convenience
 pub use complex_vec::ComplexVec;
 pub use mod_type::ModType;
+
+// Re-export commonly used items from submodules
+pub use generate::{Carrier, Channel};
 
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
 
-// Don't define a pymodule here - it will be defined in python_bindings.rs instead
-
+// Plot module only available in tests
 #[cfg(test)]
 pub mod plot;

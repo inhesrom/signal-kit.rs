@@ -1,9 +1,9 @@
 #![allow(dead_code)]
 
 use crate::mod_type::ModType;
-use crate::psk_carrier::PskCarrier;
-use crate::cw::CW;
-use crate::awgn::AWGN;
+use crate::generate::psk_carrier::PskCarrier;
+use crate::generate::cw::CW;
+use crate::generate::awgn::AWGN;
 use crate::complex_vec::ComplexVec;
 use num_traits::Float;
 
@@ -201,7 +201,7 @@ impl Carrier {
 
 #[cfg(test)]
 mod tests {
-    use crate::{plot::plot_spectrum, welch::{AveragingMethod, welch}};
+    use crate::{plot::plot_spectrum, spectrum::welch::{AveragingMethod, welch}};
 
     use super::*;
 
@@ -300,8 +300,8 @@ mod tests {
     #[test]
     fn test_carrier_combination_spectrum() {
         use std::env;
-        use crate::welch::welch;
-        use crate::window::WindowType;
+        use crate::spectrum::welch::welch;
+        use crate::spectrum::window::WindowType;
         use crate::vector_ops;
         use crate::plot::plot_spectrum;
 
@@ -388,7 +388,7 @@ mod tests {
 
         let channel_iq: ComplexVec<f32> = signal_iq + awgn_iq;
         let slice: &[Complex<f32>] = &channel_iq;
-        let (freqs, spectrum) = welch(slice, 1e6, 2048, Some(512), Some(2048), crate::window::WindowType::Rectangular, Some(AveragingMethod::Median));
+        let (freqs, spectrum) = welch(slice, 1e6, 2048, Some(512), Some(2048), crate::spectrum::window::WindowType::Rectangular, Some(AveragingMethod::Median));
 
         let plot = env::var("PLOT").unwrap_or_else(|_| "false".to_string());
         if plot.to_lowercase() == "true" {

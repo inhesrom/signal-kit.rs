@@ -83,7 +83,7 @@ impl RRCFilter {
 
 #[cfg(test)]
 mod tests {
-    use crate::rrc_filter::RRCFilter;
+    use crate::filter::rrc_filter::RRCFilter;
 
     #[test]
     fn test_build_filter_f32() {

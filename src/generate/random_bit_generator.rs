@@ -74,7 +74,7 @@ impl BitGenerator {
 
 #[cfg(test)]
 mod tests {
-    use crate::random_bit_generator::BitGenerator;
+    use crate::generate::random_bit_generator::BitGenerator;
 
     #[test]
     fn gen_bits_from_entropy() {

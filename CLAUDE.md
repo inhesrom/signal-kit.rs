@@ -67,24 +67,84 @@ Do NOT use `cargo build --features python` directly, as it lacks proper Python e
 
 ## Architecture
 
+### Project Structure
+
+The codebase is organized into logical modules:
+
+```
+src/
+├── lib.rs              # Main library entry point with public re-exports
+├── mod_type.rs         # Modulation type definitions
+├── symbol_maps.rs      # Symbol mapping tables (QPSK, 8PSK, QAM, etc.)
+├── complex_vec.rs      # Complex number vector operations
+├── fft.rs              # FFT/IFFT operations
+├── vector_ops.rs       # Vector operations (to_db, to_linear, add, etc.)
+├── vector_simd.rs      # SIMD-optimized vector operations
+├── plot.rs             # Plotting utilities (test-only)
+├── python_bindings.rs  # Python/NumPy bindings (optional)
+│
+├── filter/             # Signal filtering
+│   ├── mod.rs
+│   ├── rrc_filter.rs   # Root-Raised Cosine filter
+│   └── fft_interpolator.rs  # FFT-based resampling
+│
+├── generate/           # Signal generation
+│   ├── mod.rs
+│   ├── awgn.rs         # Additive White Gaussian Noise
+│   ├── carrier.rs      # High-level carrier generator
+│   ├── channel.rs      # Multi-carrier channel simulation
+│   ├── cw.rs           # Continuous Wave (CW) generation
+│   ├── fsk_carrier.rs  # FSK modulated carriers
+│   ├── psk_carrier.rs  # PSK modulated carriers
+│   ├── ofdm_carrier.rs # OFDM carriers (placeholder)
+│   ├── impairment.rs   # Channel impairments
+│   └── random_bit_generator.rs  # Random bit generation
+│
+└── spectrum/           # Spectrum analysis
+    ├── mod.rs
+    ├── welch.rs        # Welch PSD estimation
+    └── window.rs       # Window functions (Hann, Hamming, etc.)
+```
+
+### Module Organization
+
+The library uses idiomatic Rust module organization:
+
+- **Core types and utilities** are at the top level (`src/*.rs`)
+- **Domain-specific functionality** is organized into submodules:
+  - `filter::` - All filtering and resampling operations
+  - `generate::` - Signal and noise generation
+  - `spectrum::` - Spectral analysis tools
+
+### Public API
+
+The main public API is exposed through re-exports in `src/lib.rs`:
+
+```rust
+// Import commonly used items
+use signal_kit::{Carrier, Channel, ComplexVec, ModType};
+
+// Access submodule items
+use signal_kit::generate::{AWGN, BitGenerator, PskCarrier};
+use signal_kit::filter::{RRCFilter, fft_interpolator};
+use signal_kit::spectrum::{welch, WindowType};
+```
+
 ### Core Components
 
-The codebase is structured as a collection of independent signal processing modules:
-
-1. **BitGenerator** (`src/random_bit_generator.rs`):
+1. **BitGenerator** (`src/generate/random_bit_generator.rs`):
    - Generates random bits for testing and simulation
    - Maintains an internal buffer to efficiently extract 1-64 bits at a time
    - Supports seeded generation for reproducible tests and entropy-based generation
    - Convenience methods: `next_bit()`, `next_2_bits()`, `next_3_bits()`
 
-2. **MapDemap** (`src/symbol_mapper.rs`):
-   - Symbol mapper/demapper using generics over Float types
-   - Currently implements QPSK (Quadrature Phase Shift Keying) modulation
-   - Maps 2-bit values to IQ constellation points
-   - Demodulates symbols back to bits using nearest-neighbor search
-   - Designed to be extensible for 8-PSK and 16-APSK (infrastructure in place)
+2. **Symbol Maps** (`src/symbol_maps.rs`):
+   - Bidirectional mapping tables for various modulation schemes
+   - Implements Gray coding for QPSK, 8PSK, 16APSK, QAM16/32/64
+   - Maps bit patterns to constellation points and vice versa
+   - Used by carrier generators for modulation/demodulation
 
-3. **RRCFilter** (`src/rrc_filter.rs`):
+3. **RRCFilter** (`src/filter/rrc_filter.rs`):
    - Root-Raised Cosine pulse shaping filter
    - Generic implementation works with any Float type
    - Uses generic return types with trait bounds (`V: Default + Extend<T>`)
@@ -97,20 +157,33 @@ The codebase is structured as a collection of independent signal processing modu
 - **Generic Float Types**: All DSP components use `num_traits::Float` to work with both `f32` and `f64`
 - **Type-Driven Collections**: The `RRCFilter::build_filter()` uses generic return types with trait bounds, enabling flexible output container types
 - **Complex Number Support**: Uses `num_complex::Complex` for IQ samples and constellation points
-- **Testing**: Each module includes unit tests to verify correctness
+- **Module Organization**: Domain-driven design with `filter::`, `generate::`, and `spectrum::` submodules
+- **Public Re-exports**: Common types are re-exported from `lib.rs` for convenience
+- **Testing**: Each module includes unit tests; use `PLOT=true` environment variable to enable visualization
 
-### Current Workflow
+### Signal Generation Workflow
 
-The `main.rs` demonstrates a typical signal generation pipeline:
-1. Generate random bits using `BitGenerator`
-2. Map bit pairs to QPSK symbols using `MapDemap`
-3. Collect IQ samples (currently generates 80M symbols)
+Typical usage of the high-level API (`generate::Carrier`):
 
-Note: The RRC filter is implemented but not yet integrated into the main pipeline.
+```rust
+use signal_kit::{Carrier, ModType};
+
+let carrier = Carrier::new(
+    ModType::_QPSK,      // Modulation type
+    0.1,                 // Normalized bandwidth
+    0.1,                 // Center frequency
+    10.0,                // SNR in dB
+    0.35,                // RRC rolloff
+    1e6,                 // Sample rate
+    Some(42),            // Seed (optional)
+);
+
+let iq_samples = carrier.generate::<f64>(10000);
+```
 
 ### Multi-Carrier and Channel Simulation
 
-The library includes specialized support for transponder/channel simulation with multiple carriers:
+The library includes specialized support for transponder/channel simulation with multiple carriers (`generate::Channel`):
 
 **Single Carrier (Original Behavior)**:
 - Use `Carrier::generate()` to generate signal with noise included
@@ -143,12 +216,15 @@ combined = channel.generate(num_samples);  // Only one AWGN source added
 
 ## Dependencies
 
-- `rustfft`: FFT operations (though not currently used in visible code)
+### Core Dependencies
+- `rustfft`: FFT operations for spectrum analysis and filtering
 - `num-complex`: Complex number arithmetic for IQ samples
 - `num-traits`: Generic numeric traits for Float types
-- `rand`: Random number generation
-- `wide`: SIMD operations (not currently used in visible code)
-- `bimap`: Bidirectional maps (not currently used in visible code)
+- `rand`: Random number generation for AWGN and bit generation
+- `wide`: SIMD operations for optimized vector operations
+
+### Development/Test Dependencies
+- `plotly`: Spectrum and constellation plotting (test-only, behind `PLOT=true`)
 
 ### Optional Dependencies (Python Bindings)
 
@@ -262,6 +338,26 @@ combined_clean = iq1_clean + iq2_clean
 - **Input to Rust**: Python NumPy arrays are passed as read-only or read-write views
 - **Output from Rust**: Generated samples are transferred to Python with ownership, no copying of the actual data
 - **Supported Types**: `complex64` and `complex128` map to Rust's `Complex<f32>` and `Complex<f64>`
+
+## Testing with Visualization
+
+Many tests support visualization when the `PLOT` environment variable is set:
+
+```bash
+# Run tests without plots (default)
+cargo test
+
+# Run specific test with plots enabled
+PLOT=true cargo test test_welch_cw_tone -- --nocapture
+
+# Run all tests with plots
+PLOT=true cargo test --lib -- --nocapture
+```
+
+Tests that support plotting will skip visualization by default and show:
+```
+Skipping [test name] plot (set PLOT=true to enable)
+```
 
 ## Edition Note
 

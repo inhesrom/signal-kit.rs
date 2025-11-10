@@ -1,5 +1,5 @@
-use crate::carrier::Carrier;
-use crate::awgn::AWGN;
+use crate::generate::carrier::Carrier;
+use crate::generate::awgn::AWGN;
 use crate::complex_vec::ComplexVec;
 use num_traits::Float;
 
@@ -340,8 +340,8 @@ mod tests {
     #[test]
     fn test_channel_spectrum_with_snr_verification() {
         use std::env;
-        use crate::welch::welch;
-        use crate::window::WindowType;
+        use crate::spectrum::welch::welch;
+        use crate::spectrum::window::WindowType;
         use crate::vector_ops;
         use crate::plot::plot_spectrum;
 
@@ -447,7 +447,7 @@ mod tests {
         assert_eq!(combined_clean.len(), num_samples);
 
         // Add shared AWGN to the combined signal
-        use crate::awgn::AWGN;
+        use crate::generate::awgn::AWGN;
 
         // Use the noise floor directly as the AWGN power
         let noise_power = noise_floor;

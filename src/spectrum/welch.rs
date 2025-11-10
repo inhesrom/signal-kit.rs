@@ -2,7 +2,7 @@
 
 use num_complex::Complex;
 use num_traits::Float;
-use crate::window::{WindowType, generate_window, window_energy};
+use crate::spectrum::window::{WindowType, generate_window, window_energy};
 use crate::fft::fft::{fft, fftfreqs, fftshift};
 
 /// Averaging method for combining periodograms
@@ -284,10 +284,10 @@ fn normalize_psd<T: Float>(
 mod tests {
     use super::*;
     use std::env;
-    use crate::cw::CW;
-    use crate::awgn::AWGN;
-    use crate::fsk_carrier::FskCarrier;
-    use crate::psk_carrier::PskCarrier;
+    use crate::generate::cw::CW;
+    use crate::generate::awgn::AWGN;
+    use crate::generate::fsk_carrier::FskCarrier;
+    use crate::generate::psk_carrier::PskCarrier;
     use crate::mod_type::ModType;
 
     #[test]

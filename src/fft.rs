@@ -72,7 +72,7 @@ mod tests {
     use std::env;
 
     use crate::complex_vec::ComplexVec;
-    use crate::cw::CW;
+    use crate::generate::cw::CW;
     use crate::fft::*;
     use crate::vector_ops;
 

@@ -210,7 +210,7 @@ mod tests {
     #[test]
     fn test_bpsk_upsample_spectrum() {
         use std::env;
-        use crate::psk_carrier::PskCarrier;
+        use crate::generate::psk_carrier::PskCarrier;
         use crate::mod_type::ModType;
         use crate::fft::fft::{fft, fftshift, fftfreqs};
         use crate::vector_ops;

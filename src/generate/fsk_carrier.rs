@@ -3,7 +3,7 @@
 use num_complex::Complex;
 use num_traits::Float;
 use std::f64::consts::PI;
-use crate::random_bit_generator::BitGenerator;
+use crate::generate::random_bit_generator::BitGenerator;
 use crate::complex_vec::ComplexVec;
 
 /// Binary Continuous Phase Frequency Shift Keying (CPFSK) carrier generator
@@ -170,7 +170,7 @@ impl<T: Float> FskCarrier<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::awgn::AWGN;
+    use crate::generate::awgn::AWGN;
     use crate::fft::fft::{fft, fftshift, fftfreqs};
     use crate::vector_ops;
     use std::env;

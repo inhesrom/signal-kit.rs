@@ -325,7 +325,7 @@ mod tests {
     #[test]
     fn test_qpsk_constellation_plot() {
         use std::env;
-        use crate::random_bit_generator::BitGenerator;
+        use crate::generate::random_bit_generator::BitGenerator;
         use crate::plot::plot_constellation;
 
         let plot = env::var("PLOT").unwrap_or_else(|_| "false".to_string());

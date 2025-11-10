@@ -21,7 +21,7 @@ pub fn frequency_dependent_amplitude_variation<T: Float>(num_samples: usize, amp
 
 #[cfg(test)]
 mod tests {
-    use crate::{ComplexVec, awgn::AWGN, impairment::frequency_dependent_amplitude_variation, vector_ops::{add, to_linear}, fft::fft, welch::welch, window::WindowType, plot::plot_spectrum, vector_ops};
+    use crate::{ComplexVec, generate::awgn::AWGN, generate::impairment::frequency_dependent_amplitude_variation, vector_ops::{add, to_linear}, fft::fft, spectrum::welch::welch, spectrum::window::WindowType, plot::plot_spectrum, vector_ops};
     use rand::{Rng, SeedableRng, rngs::StdRng};
 
     #[test]
