@@ -187,32 +187,65 @@ The library includes specialized support for transponder/channel simulation with
 
 **Single Carrier (Original Behavior)**:
 - Use `Carrier::generate()` to generate signal with noise included
-- SNR is applied per-carrier before any combination
+- SNR is applied per-carrier, noise is independently generated
 
-**Multi-Carrier with Shared AWGN (New - Recommended for Channels)**:
-- Use `Carrier::generate_clean()` to generate carriers without noise
+**Multi-Carrier with Shared AWGN (Recommended for Channels)**:
+- Create multiple `Carrier` objects with different modulation, bandwidth, center frequency, and **target SNR**
 - Combine multiple carriers using `Channel` struct
+- `Channel::generate()` automatically scales each carrier to achieve its target SNR relative to the noise floor
 - Noise is added once to the combined signal (realistic channel model)
-- Each carrier's SNR in the combined signal is determined by: SNR_i = P_i / N₀
-  - Where P_i is carrier i's signal power and N₀ is the shared noise floor
+- Power scaling formula: `Required_Power = 10^(SNR_dB/10) × Noise_Floor`
 
-**Workflow Comparison**:
+**Workflow**:
 
-*Old approach (not recommended for channels)*:
 ```rust
-carrier1 = signal1 + noise1  // SNR₁ is per-carrier
-carrier2 = signal2 + noise2  // SNR₂ is per-carrier
-combined = carrier1 + carrier2  // Has noise1 + noise2 (unrealistic)
-```
+use signal_kit::{Carrier, Channel, ModType};
 
-*New approach (recommended for transponder simulation)*:
-```rust
+// Create carriers with different SNRs
+let carrier1 = Carrier::new(
+    ModType::_QPSK,
+    0.1,        // 10% bandwidth
+    0.2,        // Center freq
+    10.0,       // Target 10 dB SNR
+    0.35,       // RRC rolloff
+    1e6,        // Sample rate
+    Some(42),
+);
+
+let carrier2 = Carrier::new(
+    ModType::_16QAM,
+    0.15,       // 15% bandwidth
+    -0.15,      // Different center freq
+    5.0,        // Target 5 dB SNR
+    0.35,
+    1e6,
+    Some(43),
+);
+
+// Create channel with shared noise floor
 let mut channel = Channel::new(vec![carrier1, carrier2]);
-channel.set_noise_floor_db(-100.0);  // Set shared noise floor
-combined = channel.generate(num_samples);  // Only one AWGN source added
+channel.set_noise_floor_db(-85.0);  // Set shared noise floor in dB
+
+// Generate: each carrier automatically scaled to achieve its SNR
+let combined_iq = channel.generate::<f64>(10000);
+
+// Or generate without noise for analysis
+let combined_clean = channel.generate_clean::<f64>(10000);
 ```
 
-**Key Design Decision**: The noise floor approach allows multiple carriers with different modulations and bandwidths to coexist in a realistic channel. Each carrier's SNR is determined by its power and the shared noise floor.
+**How SNR Scaling Works**:
+1. User specifies target SNR for each carrier in `Carrier::snr_db`
+2. User sets channel noise floor via `set_noise_floor_db()` or `set_noise_floor_linear()`
+3. `Channel::generate()` calculates required power: `P_i = SNR_i_linear × N₀`
+4. Each carrier is scaled to achieve this power (using `ComplexVec::scale_to_power()`)
+5. Carriers are combined and AWGN is added with noise floor power
+6. **Result**: Each carrier achieves its specified SNR in the frequency domain
+
+**Key Benefits**:
+- Realistic multi-carrier channel model (single noise source)
+- Each carrier independently achieves its target SNR
+- Supports different modulation types, bandwidths, and center frequencies
+- Automatic power scaling handles constellation differences transparently
 
 ## Dependencies
 

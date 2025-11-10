@@ -185,6 +185,33 @@ where
         sum_power.to_f64().unwrap() / ((self.vector.len() as f64) / factor)
     }
 
+    /// Scale signal to achieve a target average power
+    ///
+    /// # Arguments
+    /// * `target_power` - desired average power (linear scale)
+    /// * `oversample_rate` - optional oversample rate for in-band power measurement
+    ///
+    /// # Returns
+    /// A new ComplexVec scaled to the target power
+    pub fn scale_to_power(&self, target_power: f64, oversample_rate: Option<f64>) -> ComplexVec<T> {
+        if target_power <= 0.0 {
+            panic!("target_power must be positive");
+        }
+
+        let current_power = self.measure_power(oversample_rate);
+
+        if current_power == 0.0 {
+            // Signal is silent, return a copy as-is
+            return ComplexVec::from_vec(self.vector.clone());
+        }
+
+        let scale = (target_power / current_power).sqrt();
+        let scale_t = T::from(scale).unwrap();
+
+        let result = self.vector.iter().map(|sample| sample * scale_t).collect();
+        ComplexVec::from_vec(result)
+    }
+
 }
 
 impl<T> Index<usize> for ComplexVec<T>

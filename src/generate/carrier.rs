@@ -312,8 +312,6 @@ mod tests {
             return;
         }
 
-        println!("\n=== Two Carrier Combination PSD (Welch Method) ===");
-
         let sample_rate = 1e6;
 
         // Create two carriers with contrasting characteristics
@@ -322,7 +320,7 @@ mod tests {
             ModType::_QPSK,
             0.05,     // 50 kHz bandwidth (narrow)
             0.15,     // 150 kHz center freq
-            25.0,     // 25 dB SNR (high power)
+            15.0,     // 25 dB SNR (high power)
             0.35,     // RRC rolloff
             sample_rate,
             Some(42),
@@ -371,23 +369,16 @@ mod tests {
     }
 
     #[test]
-    fn test_carrier_awgn() {
+    fn test_carrier_with_awgn() {
         use num_complex::Complex;
         use crate::vector_ops;
         use std::env;
 
         let carrier = Carrier::new(ModType::_QPSK, 0.25, 0.0, 10.0, 0.15, 1e6, Some(0));
         let oversample_rate = 1.0f64 / carrier.bandwidth;
-        let signal_iq = carrier.generate_clean(100_000);
+        let signal_iq = carrier.generate(1_000_000);
 
-        let carrier_power_linear = signal_iq.measure_power(Some(oversample_rate));
-        let desired_carrier_snr_linear = 10_f64.powf(carrier.snr_db / 10.0);
-        let required_noise_power_linear = carrier_power_linear / desired_carrier_snr_linear;
-        let mut awgn = AWGN::new_from_seed(1e6, 100_000, required_noise_power_linear, 0);
-        let awgn_iq = awgn.generate_block();
-
-        let channel_iq: ComplexVec<f32> = signal_iq + awgn_iq;
-        let slice: &[Complex<f32>] = &channel_iq;
+        let slice: &[Complex<f32>] = &signal_iq;
         let (freqs, spectrum) = welch(slice, 1e6, 2048, Some(512), Some(2048), crate::spectrum::window::WindowType::Rectangular, Some(AveragingMethod::Median));
 
         let plot = env::var("PLOT").unwrap_or_else(|_| "false".to_string());

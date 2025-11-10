@@ -89,32 +89,53 @@ impl Channel {
     ///
     /// # Process
     /// 1. Generate clean (noise-free) signal for each carrier
-    /// 2. Combine all carriers by summing samples
-    /// 3. Add AWGN with power equal to the set noise floor
+    /// 2. Scale each carrier to achieve its target SNR relative to the noise floor
+    /// 3. Combine all scaled carriers by summing samples
+    /// 4. Add AWGN with power equal to the set noise floor
+    ///
+    /// Each carrier's SNR is achieved by scaling its power according to:
+    /// - Required Power = 10^(SNR_dB/10) × Noise_Floor
     ///
     /// # Arguments
     /// * `num_samples` - Number of samples to generate
     ///
     /// # Returns
     /// ComplexVec<T> containing the combined signal with AWGN
+    ///
+    /// # Panics
+    /// Panics if no carriers are present or if noise floor is not set
     pub fn generate<T: Float>(&self, num_samples: usize) -> ComplexVec<T> {
         if self.carriers.is_empty() {
             panic!("Channel must have at least one carrier");
         }
 
-        // Generate clean signals from all carriers
+        // Get noise power from the noise floor (required for SNR scaling)
+        let noise_power = self.noise_floor_to_power();
+
+        // Generate, scale, and combine carriers to achieve target SNRs
         let mut combined = ComplexVec::new();
         for carrier in &self.carriers {
+            // Generate clean signal
             let clean_signal = carrier.generate_clean::<T>(num_samples);
+
+            // Calculate oversample rate for power measurement (accounts for in-band power)
+            let oversample_rate = 1.0 / carrier.bandwidth;
+
+            // Scale to achieve target SNR
+            // SNR = P_signal / P_noise  =>  P_signal = SNR_linear * P_noise
+            let snr_linear = 10.0_f64.powf(carrier.snr_db / 10.0);
+            let target_power = snr_linear * noise_power;
+
+            // Scale the carrier to target power
+            let scaled_signal = clean_signal.scale_to_power(target_power, Some(oversample_rate));
+
+            // Add to combined signal
             if combined.len() == 0 {
-                combined = clean_signal;
+                combined = scaled_signal;
             } else {
-                combined = combined + clean_signal;
+                combined = combined + scaled_signal;
             }
         }
-
-        // Get noise power from the noise floor
-        let noise_power = self.noise_floor_to_power();
 
         // Generate AWGN with the specified noise power
         // Use a fixed seed if provided, otherwise use entropy
@@ -132,26 +153,46 @@ impl Channel {
 
     /// Generate combined carrier signal without noise
     ///
-    /// Useful for analysis or when you want to add noise separately.
+    /// Each carrier is scaled to achieve its target SNR relative to the noise floor.
+    /// This allows analysis of the clean signal with correct relative power levels.
     ///
     /// # Arguments
     /// * `num_samples` - Number of samples to generate
     ///
     /// # Returns
-    /// ComplexVec<T> containing the combined clean signal
+    /// ComplexVec<T> containing the combined clean signal with proper SNR scaling
+    ///
+    /// # Panics
+    /// Panics if no carriers are present or if noise floor is not set
     pub fn generate_clean<T: Float>(&self, num_samples: usize) -> ComplexVec<T> {
         if self.carriers.is_empty() {
             panic!("Channel must have at least one carrier");
         }
 
-        // Generate and combine clean signals from all carriers
+        // Get noise power from the noise floor (required for SNR scaling)
+        let noise_power = self.noise_floor_to_power();
+
+        // Generate, scale, and combine clean signals from all carriers
         let mut combined = ComplexVec::new();
         for carrier in &self.carriers {
+            // Generate clean signal
             let clean_signal = carrier.generate_clean::<T>(num_samples);
+
+            // Calculate oversample rate for power measurement
+            let oversample_rate = 1.0 / carrier.bandwidth;
+
+            // Scale to achieve target SNR
+            let snr_linear = 10.0_f64.powf(carrier.snr_db / 10.0);
+            let target_power = snr_linear * noise_power;
+
+            // Scale the carrier to target power
+            let scaled_signal = clean_signal.scale_to_power(target_power, Some(oversample_rate));
+
+            // Add to combined signal
             if combined.len() == 0 {
-                combined = clean_signal;
+                combined = scaled_signal;
             } else {
-                combined = combined + clean_signal;
+                combined = combined + scaled_signal;
             }
         }
 
@@ -246,7 +287,8 @@ mod tests {
             1e6,
             Some(42),
         );
-        let channel = Channel::new(vec![carrier]);
+        let mut channel = Channel::new(vec![carrier]);
+        channel.set_noise_floor_db(-100.0);
 
         let clean = channel.generate_clean::<f64>(1000);
         assert_eq!(clean.len(), 1000);
@@ -352,38 +394,30 @@ mod tests {
         let num_samples = (2.0).powf(20.0) as usize;
 
         // Create two carriers with different target SNRs
-        // To get different SNRs with a shared noise floor, they need different POWERS
-        // We achieve this by using different modulation types with different constellation sizes:
-        // - QPSK (4 symbols): lower power
-        // - 16QAM (16 symbols): higher power due to larger constellation
         let carrier1 = Carrier::new(
             ModType::_QPSK,
             0.05,     // 50 kHz bandwidth (narrow)
             0.15,     // 150 kHz center freq
-            10.0,     // Target 10 dB SNR (lower power)
+            10.0,     // Target 10 dB SNR
             0.35,     // RRC rolloff
             sample_rate,
             Some(42),
         );
 
         let carrier2 = Carrier::new(
-            ModType::_16QAM,  // 16 symbols = higher average power than QPSK
+            ModType::_16QAM,
             0.10,     // 100 kHz bandwidth (wider)
             -0.20,    // -200 kHz center freq
-            5.0,      // Target 5 dB SNR (higher power, lower SNR need)
+            5.0,      // Target 5 dB SNR
             0.35,
             sample_rate,
             Some(43),
         );
 
-        // --- Approach: Noise floor first, then calculate required signal powers ---
-        // This models a real transponder: the noise floor is a channel property,
-        // and we design carriers to achieve specific SNRs by adjusting transmit power.
-
-        // Step 1: Define target SNRs and set a baseline noise floor
+        // Define target SNRs and noise floor for the channel
         let target_snr1_db = 10.0;  // dB
         let target_snr2_db = 5.0;   // dB
-        let noise_floor_db = -85.0; // dB (arbitrary baseline for the channel)
+        let noise_floor_db = -85.0; // dB
         let noise_floor = 10.0_f64.powf(noise_floor_db / 10.0);
 
         println!("\n=== Channel Spectrum: Two Carriers with Different SNRs ===");
@@ -391,82 +425,28 @@ mod tests {
         println!("Target SNR2: {:.1} dB", target_snr2_db);
         println!("Noise floor: {:.6} dB ({:.2e} linear)", noise_floor_db, noise_floor);
 
-        // Step 2: Calculate required signal powers to achieve target SNRs
-        // SNR = P_signal / P_noise  =>  P_signal = SNR * P_noise
+        // Create channel and set noise floor
+        let mut channel = Channel::new(vec![carrier1, carrier2]);
+        channel.set_noise_floor_db(noise_floor_db);
+        channel.set_seed(999);
+
+        // Generate combined signal with automatic SNR scaling
+        let combined = channel.generate::<f64>(num_samples);
+        assert_eq!(combined.len(), num_samples);
+
+        // Calculate what the scaled powers should be based on noise floor and target SNRs
         let snr1_linear = 10.0_f64.powf(target_snr1_db / 10.0);
         let snr2_linear = 10.0_f64.powf(target_snr2_db / 10.0);
-        let required_power1 = snr1_linear * noise_floor;
-        let required_power2 = snr2_linear * noise_floor;
+        let power1_target = snr1_linear * noise_floor;
+        let power2_target = snr2_linear * noise_floor;
 
-        println!("Required power for SNR1: {:.6} dB", 10.0 * required_power1.log10());
-        println!("Required power for SNR2: {:.6} dB", 10.0 * required_power2.log10());
-
-        // Step 3: Generate clean carriers and measure their unscaled powers
-        let clean1_unscaled = carrier1.generate_clean::<f64>(num_samples);
-        let clean2_unscaled = carrier2.generate_clean::<f64>(num_samples);
-        let power1_unscaled = clean1_unscaled.measure_power(Some(1.0f64/carrier1.bandwidth));
-        let power2_unscaled = clean2_unscaled.measure_power(Some(1.0f64/carrier2.bandwidth));
-
-        println!("Carrier 1 unscaled power: {:.6} dB", 10.0 * power1_unscaled.log10());
-        println!("Carrier 2 unscaled power: {:.6} dB", 10.0 * power2_unscaled.log10());
-
-        // Step 4: Calculate scaling factors to achieve required powers
-        let scale1 = (required_power1 / power1_unscaled).sqrt(); // sqrt because power = amplitude^2
-        let scale2 = (required_power2 / power2_unscaled).sqrt();
-
-        // Step 5: Apply scaling to both carriers
-        let mut clean1 = clean1_unscaled.clone();
-        let mut clean2 = clean2_unscaled.clone();
-        for sample in clean1.iter_mut() {
-            *sample = *sample * scale1;
-        }
-        for sample in clean2.iter_mut() {
-            *sample = *sample * scale2;
-        }
-
-        // Step 6: Verify actual powers after scaling
-        let power1 = clean1.measure_power(None);
-        let power2 = clean2.measure_power(None);
-
-        println!("\nActual scaled carrier powers:");
-        println!("Carrier 1 power: {:.6} dB", 10.0 * power1.log10());
-        println!("Carrier 2 power: {:.6} dB", 10.0 * power2.log10());
-        println!("Power ratio (C1/C2): {:.2} dB", 10.0 * (power1 / power2).log10());
-
-        // Step 7: Verify SNRs will be achieved
-        let snr1_actual = 10.0 * (power1 / noise_floor).log10();
-        let snr2_actual = 10.0 * (power2 / noise_floor).log10();
-        println!("\nExpected SNRs with noise floor:");
-        println!("Carrier 1 SNR: {:.2} dB (target {:.1} dB)", snr1_actual, target_snr1_db);
-        println!("Carrier 2 SNR: {:.2} dB (target {:.1} dB)", snr2_actual, target_snr2_db);
-        println!("SNR difference (C1 - C2): {:.2} dB", snr1_actual - snr2_actual);
-
-        // Combine the scaled clean signals manually
-        // (bypassing Channel to use the pre-scaled carriers)
-        let combined_clean = clean1 + clean2;
-        assert_eq!(combined_clean.len(), num_samples);
-
-        // Add shared AWGN to the combined signal
-        use crate::generate::awgn::AWGN;
-
-        // Use the noise floor directly as the AWGN power
-        let noise_power = noise_floor;
+        println!("\nTarget scaled carrier powers:");
+        println!("Carrier 1 power: {:.6} dB (SNR target: {:.1} dB)", 10.0 * power1_target.log10(), target_snr1_db);
+        println!("Carrier 2 power: {:.6} dB (SNR target: {:.1} dB)", 10.0 * power2_target.log10(), target_snr2_db);
+        println!("Power ratio (C1/C2): {:.2} dB", 10.0 * (power1_target / power2_target).log10());
 
         println!("\nNoise specification:");
         println!("Noise floor: {:.6} dB ({:.2e} linear)", noise_floor_db, noise_floor);
-
-        let mut awgn = AWGN::new_from_seed(sample_rate, num_samples, noise_power, 999);
-        let noise = awgn.generate_block::<f64>();
-        let actual_noise_power = noise.measure_power(None);
-        let combined = combined_clean + noise;
-
-        // Verify actual SNR using measured noise power
-        let actual_snr1 = 10.0 * (power1 / actual_noise_power).log10();
-        let actual_snr2 = 10.0 * (power2 / actual_noise_power).log10();
-        println!("\nVerification (measured noise power):");
-        println!("Actual noise power: {:.6} dB ({:.2e} linear)", 10.0 * actual_noise_power.log10(), actual_noise_power);
-        println!("Carrier 1 actual SNR: {:.2} dB (target 10.0 dB)", actual_snr1);
-        println!("Carrier 2 actual SNR: {:.2} dB (target 5.0 dB)", actual_snr2);
 
         // Only plot if enabled
         if plot.to_lowercase() == "true" {
