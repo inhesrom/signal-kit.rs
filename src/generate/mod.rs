@@ -15,3 +15,8 @@ pub use cw::CW;
 pub use fsk_carrier::FskCarrier;
 pub use psk_carrier::PskCarrier;
 pub use random_bit_generator::BitGenerator;
+pub use impairment::{
+    apply_digitizer_droop,
+    apply_digitizer_droop_ad9361,
+    apply_digitizer_droop_traditional,
+};
