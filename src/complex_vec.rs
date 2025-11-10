@@ -2,7 +2,7 @@
 
 use num_complex::{Complex};
 use num_traits::Float;
-use std::ops::{Index, IndexMut, Add, Sub, Deref, DerefMut};
+use std::ops::{Index, IndexMut, Add, Sub, Deref, DerefMut, Mul};
 
 /// Convolution mode
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -324,6 +324,168 @@ where
     }
 }
 
+// Element-wise multiplication: ComplexVec * ComplexVec (owned)
+impl<T> Mul for ComplexVec<T>
+where
+    T: Float,
+{
+    type Output = Self;
+
+    fn mul(self, other: ComplexVec<T>) -> Self {
+        assert_eq!(
+            self.vector.len(),
+            other.vector.len(),
+            "ComplexVec element-wise multiplication requires equal lengths"
+        );
+        let result = self
+            .vector
+            .iter()
+            .zip(other.vector.iter())
+            .map(|(a, b)| a * b)
+            .collect();
+        ComplexVec::from_vec(result)
+    }
+}
+
+// Element-wise multiplication: &ComplexVec * &ComplexVec (borrowed)
+impl<T> Mul for &ComplexVec<T>
+where
+    T: Float,
+{
+    type Output = ComplexVec<T>;
+
+    fn mul(self, other: &ComplexVec<T>) -> ComplexVec<T> {
+        assert_eq!(
+            self.vector.len(),
+            other.vector.len(),
+            "ComplexVec element-wise multiplication requires equal lengths"
+        );
+        let result = self
+            .vector
+            .iter()
+            .zip(other.vector.iter())
+            .map(|(a, b)| a * b)
+            .collect();
+        ComplexVec::from_vec(result)
+    }
+}
+
+// Scalar multiplication: ComplexVec * Complex<T>
+impl<T> Mul<Complex<T>> for ComplexVec<T>
+where
+    T: Float,
+{
+    type Output = ComplexVec<T>;
+
+    fn mul(self, scalar: Complex<T>) -> ComplexVec<T> {
+        let result = self.vector.iter().map(|v| v * scalar).collect();
+        ComplexVec::from_vec(result)
+    }
+}
+
+// Scalar multiplication: &ComplexVec * Complex<T>
+impl<T> Mul<Complex<T>> for &ComplexVec<T>
+where
+    T: Float,
+{
+    type Output = ComplexVec<T>;
+
+    fn mul(self, scalar: Complex<T>) -> ComplexVec<T> {
+        let result = self.vector.iter().map(|v| v * scalar).collect();
+        ComplexVec::from_vec(result)
+    }
+}
+
+// Scalar multiplication: Complex<T> * ComplexVec (commutative)
+impl<T> Mul<ComplexVec<T>> for Complex<T>
+where
+    T: Float,
+{
+    type Output = ComplexVec<T>;
+
+    fn mul(self, vec: ComplexVec<T>) -> ComplexVec<T> {
+        let result = vec.vector.iter().map(|v| self * v).collect();
+        ComplexVec::from_vec(result)
+    }
+}
+
+// Scalar multiplication: Complex<T> * &ComplexVec (commutative)
+impl<T> Mul<&ComplexVec<T>> for Complex<T>
+where
+    T: Float,
+{
+    type Output = ComplexVec<T>;
+
+    fn mul(self, vec: &ComplexVec<T>) -> ComplexVec<T> {
+        let result = vec.vector.iter().map(|v| self * v).collect();
+        ComplexVec::from_vec(result)
+    }
+}
+
+// Real scalar multiplication: ComplexVec * T
+impl<T> Mul<T> for ComplexVec<T>
+where
+    T: Float,
+{
+    type Output = ComplexVec<T>;
+
+    fn mul(self, scalar: T) -> ComplexVec<T> {
+        let result = self.vector.iter().map(|v| v * scalar).collect();
+        ComplexVec::from_vec(result)
+    }
+}
+
+// Real scalar multiplication: &ComplexVec * T
+impl<T> Mul<T> for &ComplexVec<T>
+where
+    T: Float,
+{
+    type Output = ComplexVec<T>;
+
+    fn mul(self, scalar: T) -> ComplexVec<T> {
+        let result = self.vector.iter().map(|v| v * scalar).collect();
+        ComplexVec::from_vec(result)
+    }
+}
+
+// Real scalar multiplication: T * ComplexVec (commutative)
+impl Mul<ComplexVec<f32>> for f32 {
+    type Output = ComplexVec<f32>;
+
+    fn mul(self, vec: ComplexVec<f32>) -> ComplexVec<f32> {
+        let result = vec.vector.iter().map(|v| v * self).collect();
+        ComplexVec::from_vec(result)
+    }
+}
+
+impl Mul<ComplexVec<f64>> for f64 {
+    type Output = ComplexVec<f64>;
+
+    fn mul(self, vec: ComplexVec<f64>) -> ComplexVec<f64> {
+        let result = vec.vector.iter().map(|v| v * self).collect();
+        ComplexVec::from_vec(result)
+    }
+}
+
+// Real scalar multiplication: T * &ComplexVec (commutative)
+impl Mul<&ComplexVec<f32>> for f32 {
+    type Output = ComplexVec<f32>;
+
+    fn mul(self, vec: &ComplexVec<f32>) -> ComplexVec<f32> {
+        let result = vec.vector.iter().map(|v| v * self).collect();
+        ComplexVec::from_vec(result)
+    }
+}
+
+impl Mul<&ComplexVec<f64>> for f64 {
+    type Output = ComplexVec<f64>;
+
+    fn mul(self, vec: &ComplexVec<f64>) -> ComplexVec<f64> {
+        let result = vec.vector.iter().map(|v| v * self).collect();
+        ComplexVec::from_vec(result)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -539,5 +701,118 @@ mod tests {
         // Test write indexing
         cv[1] = Complex::new(7.0, 8.0);
         assert_eq!(cv[1], Complex::new(7.0, 8.0));
+    }
+
+    #[test]
+    fn test_mul_element_wise() {
+        let a = ComplexVec::from_vec(vec![
+            Complex::new(2.0, 1.0),
+            Complex::new(3.0, 2.0),
+        ]);
+        let b = ComplexVec::from_vec(vec![
+            Complex::new(1.0, 1.0),
+            Complex::new(2.0, 0.0),
+        ]);
+        
+        // Test owned multiplication
+        let c = a.clone() * b.clone();
+        // (2+i)(1+i) = 2 + 2i + i + i^2 = 2 + 3i - 1 = 1 + 3i
+        assert_eq!(c[0], Complex::new(1.0, 3.0));
+        // (3+2i)(2+0i) = 6 + 4i
+        assert_eq!(c[1], Complex::new(6.0, 4.0));
+        
+        // Test borrowed multiplication
+        let d = &a * &b;
+        assert_eq!(d[0], Complex::new(1.0, 3.0));
+        assert_eq!(d[1], Complex::new(6.0, 4.0));
+    }
+
+    #[test]
+    fn test_mul_complex_scalar() {
+        let vec = ComplexVec::from_vec(vec![
+            Complex::new(1.0, 2.0),
+            Complex::new(3.0, 4.0),
+        ]);
+        let scalar = Complex::new(2.0, 1.0);
+        
+        // Test vec * scalar (owned)
+        let result1 = vec.clone() * scalar;
+        // (1+2i)(2+i) = 2 + i + 4i + 2i^2 = 2 + 5i - 2 = 0 + 5i
+        assert_eq!(result1[0], Complex::new(0.0, 5.0));
+        // (3+4i)(2+i) = 6 + 3i + 8i + 4i^2 = 6 + 11i - 4 = 2 + 11i
+        assert_eq!(result1[1], Complex::new(2.0, 11.0));
+        
+        // Test &vec * scalar (borrowed)
+        let result2 = &vec * scalar;
+        assert_eq!(result2[0], Complex::new(0.0, 5.0));
+        assert_eq!(result2[1], Complex::new(2.0, 11.0));
+        
+        // Test scalar * vec (commutative, owned)
+        let result3 = scalar * vec.clone();
+        assert_eq!(result3[0], Complex::new(0.0, 5.0));
+        assert_eq!(result3[1], Complex::new(2.0, 11.0));
+        
+        // Test scalar * &vec (commutative, borrowed)
+        let result4 = scalar * &vec;
+        assert_eq!(result4[0], Complex::new(0.0, 5.0));
+        assert_eq!(result4[1], Complex::new(2.0, 11.0));
+    }
+
+    #[test]
+    fn test_mul_real_scalar_f64() {
+        let vec = ComplexVec::from_vec(vec![
+            Complex::new(1.0_f64, 2.0_f64),
+            Complex::new(3.0_f64, 4.0_f64),
+        ]);
+        let scalar = 2.5_f64;
+        
+        // Test vec * scalar (owned)
+        let result1 = vec.clone() * scalar;
+        assert_eq!(result1[0], Complex::new(2.5, 5.0));
+        assert_eq!(result1[1], Complex::new(7.5, 10.0));
+        
+        // Test &vec * scalar (borrowed)
+        let result2 = &vec * scalar;
+        assert_eq!(result2[0], Complex::new(2.5, 5.0));
+        assert_eq!(result2[1], Complex::new(7.5, 10.0));
+        
+        // Test scalar * vec (commutative, owned)
+        let result3 = scalar * vec.clone();
+        assert_eq!(result3[0], Complex::new(2.5, 5.0));
+        assert_eq!(result3[1], Complex::new(7.5, 10.0));
+        
+        // Test scalar * &vec (commutative, borrowed)
+        let result4 = scalar * &vec;
+        assert_eq!(result4[0], Complex::new(2.5, 5.0));
+        assert_eq!(result4[1], Complex::new(7.5, 10.0));
+    }
+
+    #[test]
+    fn test_mul_real_scalar_f32() {
+        let vec = ComplexVec::from_vec(vec![
+            Complex::new(1.0_f32, 2.0_f32),
+            Complex::new(3.0_f32, 4.0_f32),
+        ]);
+        let scalar = 2.5_f32;
+        
+        // Test vec * scalar (owned)
+        let result1 = vec.clone() * scalar;
+        assert_eq!(result1[0], Complex::new(2.5, 5.0));
+        assert_eq!(result1[1], Complex::new(7.5, 10.0));
+        
+        // Test &vec * scalar (borrowed)
+        let result2 = &vec * scalar;
+        assert_eq!(result2[0], Complex::new(2.5, 5.0));
+        assert_eq!(result2[1], Complex::new(7.5, 10.0));
+        
+        // Test scalar * vec (commutative, owned)
+        let result3 = scalar * vec.clone();
+        assert_eq!(result3[0], Complex::new(2.5, 5.0));
+        assert_eq!(result3[1], Complex::new(7.5, 10.0));
+        
+        // Test scalar * &vec (commutative, borrowed)
+        let result4 = scalar * &vec;
+        assert_eq!(result4[0], Complex::new(2.5, 5.0));
+        assert_eq!(result4[1], Complex::new(7.5, 10.0));
     }
 }
