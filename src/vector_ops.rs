@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
-use std::cmp::PartialOrd;
 use std::any::TypeId;
+use std::cmp::PartialOrd;
 
 use num_traits::Float;
 
@@ -31,4 +31,31 @@ pub fn to_db<T: Float + 'static>(vector: &[T]) -> Vec<T> {
     }
 
     v
+}
+
+pub fn to_linear<T: Float>(vector: &[T]) -> Vec<T> {
+    let tenth = T::from(1.0 / 10.0).unwrap();
+    vector.iter().map(|val| tenth.powf(*val * tenth)).collect()
+}
+
+pub fn add<T>(a: &[T], b: &[T]) -> Vec<T>
+where
+    T: std::ops::Add<Output = T> + Copy,
+{
+    assert_eq!(a.len(), b.len());
+    a.iter().zip(b.iter()).map(|(x, y)| *x + *y).collect()
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_add_vectors() {
+        let a = vec![1, 2, 3];
+        let b = vec![4, 5, 6];
+        let c = add(&a, &b);
+        assert_eq!(c, vec![5, 7, 9]);
+    }
 }

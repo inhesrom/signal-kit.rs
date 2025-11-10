@@ -15,6 +15,7 @@ mod ofdm_carrier;
 mod welch;
 mod carrier;
 mod channel;
+mod impairment;
 
 #[cfg(feature = "python")]
 mod python_bindings;

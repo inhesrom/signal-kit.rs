@@ -32,6 +32,7 @@ build/
 .Python
 .pytest_cache/
 .venv/
+.zed/
 venv/
 ENV/
 env/
