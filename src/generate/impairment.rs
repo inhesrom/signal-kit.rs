@@ -56,6 +56,7 @@ use num_traits::Float;
 use num_complex::Complex;
 use std::f64::consts::PI;
 use crate::filter::butterworth::apply_butterworth_filter;
+use crate::filter::cosine::{apply_cosine_taper_filter, apply_cosine_taper_digitizer};
 use crate::vector_ops::to_linear;
 use crate::fft::fft::{fft, ifft};
 
@@ -99,6 +100,16 @@ pub enum Impairment {
         /// Phase offset of the sinusoid
         phase_offset: f64,
     },
+    /// Cosine taper digitizer droop (alternative to Butterworth, NO DC suppression)
+    /// Passband: 0-42%, Transition: 42-48%, Stopband: 48-50%
+    CosineTaperDigitizer,
+    /// Custom cosine taper digitizer droop
+    CosineTaper {
+        /// End of passband (0.0 to 0.5)
+        passband_end: f64,
+        /// Start of stopband (0.0 to 0.5, must be > passband_end)
+        stopband_start: f64,
+    },
 }
 
 impl Impairment {
@@ -137,6 +148,12 @@ impl Impairment {
                     *sample = *sample * variation_lin[i];
                 }
                 ifft(signal);
+            }
+            Impairment::CosineTaperDigitizer => {
+                apply_cosine_taper_digitizer(signal);
+            }
+            Impairment::CosineTaper { passband_end, stopband_start } => {
+                apply_cosine_taper_filter(signal, *passband_end, *stopband_start);
             }
         }
     }

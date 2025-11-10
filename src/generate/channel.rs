@@ -583,7 +583,7 @@ mod tests {
         );
 
         let mut channel = Channel::new(vec![carrier]);
-        channel.set_noise_floor_db(-100.0);
+        channel.set_noise_floor_db(-5.0);
         channel.set_seed(998);
 
         // Add multiple impairments
@@ -591,7 +591,7 @@ mod tests {
         channel.add_impairment(Impairment::FrequencyVariation {
             amplitude_db: 0.5,
             cycles: 2.0,
-            phase_offset: 0.0,
+            phase_offset: 1.0,
         });
 
         let result = channel.generate::<f64>(num_samples);
@@ -599,7 +599,7 @@ mod tests {
 
         println!("\n=== Channel with Multiple Impairments ===");
         println!("Impairments applied:");
-        println!("  1. DigitizerDroopAD9361 (3rd order Butterworth, cutoff=0.45)");
+        println!("  1. CosineTaperDigitizer (cosine taper, passband=0-42%, transition=42-48%)");
         println!("  2. FrequencyVariation (amplitude=1.0 dB, cycles=2.0)");
 
         // Only plot if enabled
@@ -612,9 +612,9 @@ mod tests {
                 &signal,
                 sample_rate,
                 1024,
-                None,
-                None,
-                WindowType::Hann,
+                Some(512),
+                Some(1024),
+                WindowType::Hamming,
                 None,
             );
 

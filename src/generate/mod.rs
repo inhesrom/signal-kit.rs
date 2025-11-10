@@ -21,3 +21,10 @@ pub use impairment::{
     apply_digitizer_droop_ad9361,
     apply_digitizer_droop_traditional,
 };
+
+// Re-export cosine taper filter functions
+pub use crate::filter::cosine::{
+    apply_cosine_taper_filter,
+    apply_cosine_taper_digitizer,
+    apply_cosine_taper_aggressive,
+};
