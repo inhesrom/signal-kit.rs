@@ -22,6 +22,7 @@ pub fn frequency_dependent_amplitude_variation<T: Float>(num_samples: usize, amp
 #[cfg(test)]
 mod tests {
     use crate::{ComplexVec, awgn::AWGN, impairment::frequency_dependent_amplitude_variation, vector_ops::{add, to_linear}, fft::fft, welch::welch, window::WindowType, plot::plot_spectrum, vector_ops};
+    use rand::{Rng, SeedableRng, rngs::StdRng};
 
     #[test]
     fn test_freq_ampl_variation() {
@@ -47,6 +48,60 @@ mod tests {
         let mut noise: ComplexVec<f32> = awgn.generate_block();
         // Apply frequency-dependent amplitude variation in frequency domain
         fft::fft(&mut noise);
+        for (i, sample) in noise.iter_mut().enumerate() {
+            *sample *= total_variation_lin[i] as f32;
+        }
+        fft::ifft(&mut noise);
+        // Compute Welch PSD
+        let (freqs, psd) = welch::<f32>(
+            &noise,
+            sample_rate as f32,
+            2048,                    // 1024-point segments
+            None,                    // 50% overlap (default)
+            None,                    // No zero-padding (default)
+            WindowType::Hann,        // Hann window (standard)
+            None,                    // Mean averaging (default)
+        );
+        // Convert PSD to dB scale
+        let psd_db: Vec<f32> = vector_ops::to_db(&psd);
+        // Plot Welch PSD
+        plot_spectrum(&freqs, &psd_db, "Frequency-Dependent Amplitude Variation Applied to AWGN");
+    }
+
+    #[test]
+    fn test_random_freq_ampl_variation() {
+        use std::env;
+        use std::f64::consts::PI;
+
+        let plot = env::var("PLOT").unwrap_or_else(|_| "false".to_string());
+        if plot.to_lowercase() != "true" {
+            println!("Skipping frequency-dependent amplitude variation plot (set PLOT=true to enable)");
+            return;
+        }
+
+        let seed = 2; // or any u64
+        let mut rng = StdRng::seed_from_u64(seed);
+        let sample_rate = 1e6_f64;
+        let num_samples = (2.0_f64).powf(20.0) as usize;  // Use power of 2 for better FFT performance
+
+        let mut awgn = AWGN::new_from_seed(sample_rate, num_samples, 1.0, 0);
+        let mut noise: ComplexVec<f32> = awgn.generate_block();
+        fft::fft(&mut noise);
+
+        // Apply frequency-dependent amplitude variation in frequency domain
+        let num_variations = rand::thread_rng().gen_range(1..=5);
+        let mut freq_var_total: Vec<f32> = vec![0.0; num_samples];
+        for _ in 0..num_variations {
+            let amplitude_variation: f32 = rng.gen_range(0.0..=1.0);
+            let cycles: f32 = rng.gen_range(1.0..=6.0);
+            let phase_offset: f32 = rng.gen_range(0.0..=2.0 * PI as f32);
+            
+            let freq_variation = frequency_dependent_amplitude_variation::<f32>(num_samples, amplitude_variation, cycles, phase_offset);
+            freq_var_total = add(&freq_var_total, &freq_variation);
+        }
+        let total_variation_lin = to_linear(&freq_var_total);
+
+        // Apply frequency-dependent amplitude variation in frequency domain
         for (i, sample) in noise.iter_mut().enumerate() {
             *sample *= total_variation_lin[i] as f32;
         }
