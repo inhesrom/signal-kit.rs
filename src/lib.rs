@@ -4,7 +4,6 @@ pub mod fft;
 pub mod mod_type;
 pub mod symbol_maps;
 pub mod vector_ops;
-pub mod vector_simd;
 
 // Organized modules
 pub mod filter;
