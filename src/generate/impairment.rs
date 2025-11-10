@@ -56,6 +56,91 @@ use num_traits::Float;
 use num_complex::Complex;
 use std::f64::consts::PI;
 use crate::filter::butterworth::apply_butterworth_filter;
+use crate::vector_ops::to_linear;
+use crate::fft::fft::{fft, ifft};
+
+/// Channel impairment types that can be applied to signals
+///
+/// Represents various channel impairments like digitizer droop and frequency-dependent
+/// amplitude variations. Each variant can be applied independently or in combination.
+///
+/// # Example
+/// ```ignore
+/// use signal_kit::generate::Impairment;
+///
+/// let droop = Impairment::DigitizerDroopAD9361;
+/// let freq_var = Impairment::FrequencyVariation {
+///     amplitude_db: 1.0,
+///     cycles: 3.0,
+///     phase_offset: 0.0,
+/// };
+///
+/// let impairments = vec![droop, freq_var];
+/// ```
+#[derive(Clone, Debug)]
+pub enum Impairment {
+    /// Digitizer droop with custom order and cutoff frequency
+    DigitizerDroop {
+        /// Filter order (3-4: gentle, 5-6: medium, 7-8: steep)
+        order: i32,
+        /// Normalized cutoff frequency (0.0 to 0.5)
+        cutoff: f64,
+    },
+    /// AD9361-style digitizer droop (3rd order, 0.45 cutoff)
+    DigitizerDroopAD9361,
+    /// Traditional digitizer droop (6th order, 0.42 cutoff)
+    DigitizerDroopTraditional,
+    /// Frequency-dependent amplitude variation (ripple across spectrum)
+    FrequencyVariation {
+        /// Amplitude of variation in dB
+        amplitude_db: f64,
+        /// Number of sinusoidal cycles across the spectrum
+        cycles: f64,
+        /// Phase offset of the sinusoid
+        phase_offset: f64,
+    },
+}
+
+impl Impairment {
+    /// Apply this impairment to a signal (must work with f64 samples)
+    ///
+    /// Modifies the signal in-place. For generic channels, the signal is converted
+    /// from generic type to f64, impaired, and converted back.
+    pub fn apply(&self, signal: &mut [Complex<f64>]) {
+        match self {
+            Impairment::DigitizerDroop { order, cutoff } => {
+                apply_butterworth_filter(signal, *order, *cutoff);
+            }
+            Impairment::DigitizerDroopAD9361 => {
+                apply_digitizer_droop_ad9361(signal);
+            }
+            Impairment::DigitizerDroopTraditional => {
+                apply_digitizer_droop_traditional(signal);
+            }
+            Impairment::FrequencyVariation {
+                amplitude_db,
+                cycles,
+                phase_offset,
+            } => {
+                // Generate frequency-domain variation pattern
+                let variation = frequency_dependent_amplitude_variation(
+                    signal.len(),
+                    *amplitude_db,
+                    *cycles,
+                    *phase_offset,
+                );
+                let variation_lin = to_linear(&variation);
+
+                // Apply in frequency domain
+                fft(signal);
+                for (i, sample) in signal.iter_mut().enumerate() {
+                    *sample = *sample * variation_lin[i];
+                }
+                ifft(signal);
+            }
+        }
+    }
+}
 
 pub fn frequency_dependent_amplitude_variation<T: Float>(num_samples: usize, amplitude_db: T, cycles: T, phase_offset: T,
 ) -> Vec<T> {

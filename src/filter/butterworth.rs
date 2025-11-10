@@ -1,4 +1,5 @@
 use num_complex::Complex;
+use num_traits::{Float, Signed};
 use rustfft::FftPlanner;
 
 /// Create Butterworth frequency response in frequency domain
@@ -10,21 +11,24 @@ use rustfft::FftPlanner;
 ///
 /// # Returns
 /// Vector of frequency-domain filter coefficients
-pub fn create_butterworth_filter(num_samples: usize, order: i32, cutoff: f64) -> Vec<f64> {
-    let mut filter_response = vec![0.0; num_samples];
+pub fn create_butterworth_filter<T: Float>(num_samples: usize, order: i32, cutoff: T) -> Vec<T> {
+    let mut filter_response = vec![T::zero(); num_samples];
+    let one = T::one();
 
     for i in 0..num_samples {
         // Convert index to normalized frequency [-0.5, 0.5]
         let f = if i < num_samples / 2 {
-            i as f64 / num_samples as f64
+            T::from(i).unwrap() / T::from(num_samples).unwrap()
         } else {
-            (i as f64 - num_samples as f64) / num_samples as f64
+            (T::from(i).unwrap() - T::from(num_samples).unwrap()) / T::from(num_samples).unwrap()
         };
 
         let norm_freq = f.abs();
 
         // Butterworth magnitude response: H(f) = 1 / sqrt(1 + (f/fc)^(2n))
-        filter_response[i] = 1.0 / (1.0 + (norm_freq / cutoff).powi(2 * order)).sqrt();
+        let ratio = norm_freq / cutoff;
+        let power = ratio.powi(2 * order);
+        filter_response[i] = one / (one + power).sqrt();
     }
 
     filter_response
@@ -42,7 +46,10 @@ pub fn create_butterworth_filter(num_samples: usize, order: i32, cutoff: f64) ->
 /// let mut iq = generate_iq_noise(100_000, -97.0);
 /// apply_butterworth_filter(&mut iq, 3, 0.45);  // 3rd order, cutoff at 0.45*Nyquist
 /// ```
-pub fn apply_butterworth_filter(signal: &mut [Complex<f64>], order: i32, cutoff: f64) {
+pub fn apply_butterworth_filter<T>(signal: &mut [Complex<T>], order: i32, cutoff: T)
+where
+    T: Float + Signed + Send + Sync + std::fmt::Debug + num_traits::cast::FromPrimitive + std::ops::RemAssign + std::ops::DivAssign + 'static,
+{
     let n = signal.len();
 
     // Create filter in frequency domain
@@ -63,7 +70,7 @@ pub fn apply_butterworth_filter(signal: &mut [Complex<f64>], order: i32, cutoff:
     ifft.process(signal);
 
     // Normalize (rustfft doesn't normalize)
-    let scale = 1.0 / (n as f64);
+    let scale = T::one() / T::from(n).unwrap();
     for sample in signal.iter_mut() {
         *sample = *sample * scale;
     }

@@ -247,6 +247,42 @@ let combined_clean = channel.generate_clean::<f64>(10000);
 - Supports different modulation types, bandwidths, and center frequencies
 - Automatic power scaling handles constellation differences transparently
 
+### Channel Impairments
+
+The `Channel` struct supports applying realistic channel impairments to the complete combined signal. Impairments are applied after noise addition to model receiver-side effects.
+
+**Available Impairments:**
+- **Digitizer Droop**: Simulates anti-aliasing filter effects of real digitizers
+  - `Impairment::DigitizerDroopAD9361`: 3rd order at 0.45 Nyquist (SDR-style)
+  - `Impairment::DigitizerDroopTraditional`: 6th order at 0.42 Nyquist (high-quality)
+  - `Impairment::DigitizerDroop { order, cutoff }`: Custom configuration
+- **Frequency-Dependent Amplitude Variation**: Ripple across the spectrum
+  - `Impairment::FrequencyVariation { amplitude_db, cycles, phase_offset }`
+
+**Usage Example:**
+```rust
+use signal_kit::{Carrier, Channel, ModType, generate::Impairment};
+
+let mut channel = Channel::new(vec![carrier1, carrier2]);
+channel.set_noise_floor_db(-85.0);
+
+// Add impairments
+channel.add_impairment(Impairment::DigitizerDroopAD9361);
+channel.add_impairment(Impairment::FrequencyVariation {
+    amplitude_db: 1.0,
+    cycles: 3.0,
+    phase_offset: 0.0,
+});
+
+let signal = channel.generate::<f64>(10000);
+```
+
+**How Impairments Work:**
+- Applied sequentially in the order they are added
+- Operate on the complete combined signal (all carriers + noise)
+- Applied in frequency domain for efficiency where applicable
+- Currently support f64 precision (converted from generic T if needed)
+
 ## Dependencies
 
 ### Core Dependencies

@@ -1,13 +1,15 @@
 use crate::generate::carrier::Carrier;
 use crate::generate::awgn::AWGN;
+use crate::generate::impairment::Impairment;
 use crate::complex_vec::ComplexVec;
 use num_traits::Float;
 
-/// A multi-carrier channel simulator with shared AWGN
+/// A multi-carrier channel simulator with shared AWGN and configurable impairments
 ///
 /// This struct manages multiple carriers that are combined into a single channel with AWGN.
 /// Noise is added once to the combined signal (not per-carrier), modeling a realistic
-/// transponder or channel scenario.
+/// transponder or channel scenario. Channel impairments (digitizer droop, frequency-dependent
+/// amplitude variations, etc.) can be applied to the complete combined signal.
 ///
 /// # SNR Calculation
 ///
@@ -18,13 +20,21 @@ use num_traits::Float;
 /// The user specifies the noise floor (N₀) which is equivalent to specifying the noise
 /// power spectral density (in dB or linear units).
 ///
-/// # Example
+/// # Example with Impairments
 /// ```ignore
+/// use signal_kit::{Carrier, Channel, ModType, generate::Impairment};
+///
 /// let carrier1 = Carrier::new(ModType::_QPSK, 0.1, 0.1, 10.0, 0.35, 1e6, Some(42));
 /// let carrier2 = Carrier::new(ModType::_QPSK, 0.1, -0.1, 10.0, 0.35, 1e6, Some(43));
 ///
 /// let mut channel = Channel::new(vec![carrier1, carrier2]);
-/// channel.set_noise_floor_db(-100.0); // Set noise floor in dB
+/// channel.set_noise_floor_db(-100.0);
+/// channel.add_impairment(Impairment::DigitizerDroopAD9361);
+/// channel.add_impairment(Impairment::FrequencyVariation {
+///     amplitude_db: 1.0,
+///     cycles: 3.0,
+///     phase_offset: 0.0,
+/// });
 ///
 /// let combined_iq = channel.generate::<f64>(10000);
 /// ```
@@ -32,6 +42,7 @@ pub struct Channel {
     carriers: Vec<Carrier>,
     noise_floor_db: Option<f64>,  // Noise power (linear units, converted to dB internally)
     seed: Option<u64>,             // Seed for AWGN generator
+    impairments: Vec<Impairment>,  // Channel impairments to apply after noise
 }
 
 impl Channel {
@@ -44,6 +55,7 @@ impl Channel {
             carriers,
             noise_floor_db: None,
             seed: None,
+            impairments: Vec::new(),
         }
     }
 
@@ -73,6 +85,29 @@ impl Channel {
     /// * `seed` - Seed value for the AWGN random number generator
     pub fn set_seed(&mut self, seed: u64) {
         self.seed = Some(seed);
+    }
+
+    /// Add a single impairment to the channel
+    ///
+    /// Impairments are applied after noise addition, to the complete combined signal.
+    /// Multiple impairments are applied in the order they were added.
+    ///
+    /// # Arguments
+    /// * `impairment` - Channel impairment to apply
+    pub fn add_impairment(&mut self, impairment: Impairment) -> &mut Self {
+        self.impairments.push(impairment);
+        self
+    }
+
+    /// Set all impairments for this channel
+    ///
+    /// Replaces any previously added impairments with the provided vector.
+    ///
+    /// # Arguments
+    /// * `impairments` - Vector of impairments to apply
+    pub fn with_impairments(&mut self, impairments: Vec<Impairment>) -> &mut Self {
+        self.impairments = impairments;
+        self
     }
 
     /// Calculate the required noise power based on the noise floor
@@ -146,7 +181,37 @@ impl Channel {
         };
 
         let noise = awgn.generate_block::<T>();
-        let result = combined + noise;
+        let mut result = combined + noise;
+
+        // Apply impairments to the complete signal (after noise addition)
+        if !self.impairments.is_empty() {
+            // For impairments, we need to work with f64 samples (current limitation)
+            // Convert to f64, apply impairments, convert back
+            let mut result_f64: Vec<num_complex::Complex<f64>> = result
+                .iter()
+                .map(|c| {
+                    num_complex::Complex::new(c.re.to_f64().unwrap(), c.im.to_f64().unwrap())
+                })
+                .collect();
+
+            // Apply each impairment in order
+            for impairment in &self.impairments {
+                impairment.apply(&mut result_f64);
+            }
+
+            // Convert back to original type
+            result = ComplexVec::from_vec(
+                result_f64
+                    .into_iter()
+                    .map(|c| {
+                        num_complex::Complex::new(
+                            T::from(c.re).unwrap(),
+                            T::from(c.im).unwrap(),
+                        )
+                    })
+                    .collect(),
+            );
+        }
 
         result
     }
@@ -469,6 +534,164 @@ mod tests {
 
             // Plot Welch PSD
             plot_spectrum(&freqs, &psd_db, "Channel Spectrum: Two Carriers (10dB and 5dB SNR) with Shared AWGN");
+        } else {
+            println!("Skipping spectrum plot (set PLOT=true to enable)");
+        }
+    }
+
+    #[test]
+    fn test_channel_with_single_impairment() {
+        let carrier = Carrier::new(
+            ModType::_QPSK,
+            0.1,
+            0.1,
+            10.0,
+            0.35,
+            1e6,
+            Some(42),
+        );
+        let mut channel = Channel::new(vec![carrier]);
+        channel.set_noise_floor_db(-100.0);
+        channel.add_impairment(Impairment::DigitizerDroopAD9361);
+
+        let result = channel.generate::<f64>(1000);
+        assert_eq!(result.len(), 1000);
+    }
+
+    #[test]
+    fn test_channel_with_multiple_impairments() {
+        use std::env;
+        use crate::spectrum::welch::welch;
+        use crate::spectrum::window::WindowType;
+        use crate::vector_ops;
+        use crate::plot::plot_spectrum;
+
+        // Check if plotting is enabled
+        let plot = env::var("PLOT").unwrap_or_else(|_| "false".to_string());
+
+        let sample_rate = 1e6;
+        let num_samples = 1000000;
+
+        let carrier = Carrier::new(
+            ModType::_QPSK,
+            0.1,
+            0.1,
+            10.0,
+            0.35,
+            sample_rate,
+            Some(42),
+        );
+
+        let mut channel = Channel::new(vec![carrier]);
+        channel.set_noise_floor_db(-100.0);
+        channel.set_seed(998);
+
+        // Add multiple impairments
+        channel.add_impairment(Impairment::DigitizerDroopAD9361);
+        channel.add_impairment(Impairment::FrequencyVariation {
+            amplitude_db: 0.5,
+            cycles: 2.0,
+            phase_offset: 0.0,
+        });
+
+        let result = channel.generate::<f64>(num_samples);
+        assert_eq!(result.len(), num_samples);
+
+        println!("\n=== Channel with Multiple Impairments ===");
+        println!("Impairments applied:");
+        println!("  1. DigitizerDroopAD9361 (3rd order Butterworth, cutoff=0.45)");
+        println!("  2. FrequencyVariation (amplitude=1.0 dB, cycles=2.0)");
+
+        // Only plot if enabled
+        if plot.to_lowercase() == "true" {
+            // Convert ComplexVec to Vec<Complex<f64>> for Welch processing
+            let signal: Vec<_> = (0..result.len()).map(|i| result[i]).collect();
+
+            // Compute Welch PSD
+            let (freqs, psd) = welch(
+                &signal,
+                sample_rate,
+                1024,
+                None,
+                None,
+                WindowType::Hann,
+                None,
+            );
+
+            // Convert PSD to dB scale
+            let psd_db: Vec<f64> = vector_ops::to_db(&psd);
+
+            // Plot Welch PSD
+            plot_spectrum(&freqs, &psd_db, "Channel with Multiple Impairments (Droop + Frequency Variation)");
+        } else {
+            println!("Skipping spectrum plot (set PLOT=true to enable)");
+        }
+    }
+
+    #[test]
+    fn test_channel_with_custom_digitizer_droop() {
+        use std::env;
+        use crate::spectrum::welch::welch;
+        use crate::spectrum::window::WindowType;
+        use crate::vector_ops;
+        use crate::plot::plot_spectrum;
+
+        // Check if plotting is enabled
+        let plot = env::var("PLOT").unwrap_or_else(|_| "false".to_string());
+
+        let sample_rate = 1e6;
+        let num_samples = 10000;
+
+        let carrier = Carrier::new(
+            ModType::_QPSK,
+            0.1,
+            0.0,
+            10.0,
+            0.35,
+            sample_rate,
+            Some(42),
+        );
+
+        let mut channel = Channel::new(vec![carrier]);
+        channel.set_noise_floor_db(-100.0);
+        channel.set_seed(999);
+
+        // Add custom digitizer droop (4th order, higher cutoff)
+        channel.add_impairment(Impairment::DigitizerDroop {
+            order: 4,
+            cutoff: 0.48,
+        });
+
+        let result = channel.generate::<f64>(num_samples);
+        assert_eq!(result.len(), num_samples);
+
+        println!("\n=== Channel with Custom Digitizer Droop ===");
+        println!("Digitizer Droop Configuration:");
+        println!("  Order: 4");
+        println!("  Cutoff: 0.48 Nyquist");
+        println!("  (Steeper rolloff than AD9361, but not as steep as traditional)");
+
+        // Only plot if enabled
+        if plot.to_lowercase() == "true" {
+            // Convert ComplexVec to Vec<Complex<f64>> for Welch processing
+            let signal: Vec<_> = (0..result.len()).map(|i| result[i]).collect();
+
+            // Compute Welch PSD
+            let (freqs, psd) = welch(
+                &signal,
+                sample_rate,
+                1024,
+                None,
+                None,
+                WindowType::Hann,
+                None,
+            );
+
+            // Convert PSD to dB scale
+            let psd_db: Vec<f64> = vector_ops::to_db(&psd);
+
+            // Plot Welch PSD
+            plot_spectrum(&freqs, &psd_db, "Channel with Custom Digitizer Droop (4th Order, 0.48 Cutoff)");
         } else {
             println!("Skipping spectrum plot (set PLOT=true to enable)");
         }
