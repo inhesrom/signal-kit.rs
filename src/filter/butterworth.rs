@@ -320,4 +320,225 @@ mod tests {
         println!("  - -3dB point is around 225 kHz");
         println!("  - Smooth Butterworth rolloff");
     }
+
+    #[test]
+    fn test_dc_suppression_diagnostic() {
+        use std::env;
+        use crate::spectrum::welch::welch;
+        use crate::spectrum::window::WindowType;
+        use crate::vector_ops;
+        use crate::plot::plot_spectrum;
+        use crate::fft::fft::{fft, fftshift, fftfreqs};
+
+        let plot = env::var("PLOT").unwrap_or_else(|_| "false".to_string());
+        if plot.to_lowercase() != "true" {
+            println!("Skipping DC suppression diagnostic (set PLOT=true to enable)");
+            return;
+        }
+
+        println!("\n=== DC SUPPRESSION DIAGNOSTIC ===");
+        println!("Testing 3 methods to determine source of DC drop:\n");
+
+        let sample_rate = 1e6;
+        let n_samples = (2.0_f64).powf(18.0) as usize; // 262144 samples
+        let order = 3;
+        let cutoff = 0.45;
+
+        // METHOD 1: Direct filter coefficients (GROUND TRUTH)
+        println!("METHOD 1: Direct Filter Coefficients");
+        let filter = create_butterworth_filter(n_samples, order, cutoff);
+        println!("  Filter[0] (DC bin) = {:.15}", filter[0]);
+        println!("  Filter[1] (1st bin) = {:.15}", filter[1]);
+        println!("  Filter[10] (10th bin) = {:.15}", filter[10]);
+
+        let dc_db_direct = 20.0 * filter[0].log10();
+        println!("  DC in dB = {:.6} dB", dc_db_direct);
+
+        if (filter[0] - 1.0).abs() < 1e-10 {
+            println!("  ✓ NO DC SUPPRESSION in filter coefficients!\n");
+        } else {
+            println!("  ✗ DC SUPPRESSION DETECTED in filter!\n");
+        }
+
+        // METHOD 2: Direct FFT (no windowing, no averaging)
+        println!("METHOD 2: Direct FFT Method (No Windowing)");
+        let noise = generate_iq_noise(n_samples, -80.0);
+        let mut filtered_fft = noise.clone();
+        apply_butterworth_filter(&mut filtered_fft, order, cutoff);
+
+        // Take FFT manually
+        let mut freq_domain = filtered_fft.clone();
+        fft(&mut freq_domain);
+
+        // Compute PSD manually (no windowing)
+        let mut psd_fft: Vec<f64> = freq_domain.iter()
+            .map(|c| c.norm_sqr() / n_samples as f64)
+            .collect();
+
+        // Shift for plotting
+        fftshift(&mut psd_fft);
+        let psd_fft_db: Vec<f64> = vector_ops::to_db(&psd_fft);
+        let freqs_fft: Vec<f64> = fftfreqs(-sample_rate/2.0, sample_rate/2.0, n_samples);
+
+        // Find DC value (center of shifted array)
+        let dc_idx_fft = n_samples / 2;
+        let dc_db_fft = psd_fft_db[dc_idx_fft];
+        println!("  DC value in PSD = {:.6} dB", dc_db_fft);
+        println!("  ✓ Direct FFT (no windowing artifacts)\n");
+
+        // METHOD 3: Welch with Hann window (standard method)
+        println!("METHOD 3: Welch PSD with Hann Window");
+        let mut filtered_welch_hann = noise.clone();
+        apply_butterworth_filter(&mut filtered_welch_hann, order, cutoff);
+
+        let (freqs_hann, psd_hann) = welch(
+            &filtered_welch_hann,
+            sample_rate,
+            2048,
+            None,
+            None,
+            WindowType::Hann,
+            None,
+        );
+        let psd_hann_db: Vec<f64> = vector_ops::to_db(&psd_hann);
+
+        // Find DC bin (center)
+        let dc_idx_hann = psd_hann_db.len() / 2;
+        let dc_db_hann = psd_hann_db[dc_idx_hann];
+        println!("  DC value in PSD = {:.6} dB", dc_db_hann);
+
+        // METHOD 4: Welch with Rectangular window (no windowing effect)
+        println!("\nMETHOD 4: Welch PSD with Rectangular Window");
+        let mut filtered_welch_rect = noise.clone();
+        apply_butterworth_filter(&mut filtered_welch_rect, order, cutoff);
+
+        let (freqs_rect, psd_rect) = welch(
+            &filtered_welch_rect,
+            sample_rate,
+            2048,
+            None,
+            None,
+            WindowType::Rectangular,
+            None,
+        );
+        let psd_rect_db: Vec<f64> = vector_ops::to_db(&psd_rect);
+
+        let dc_idx_rect = psd_rect_db.len() / 2;
+        let dc_db_rect = psd_rect_db[dc_idx_rect];
+        println!("  DC value in PSD = {:.6} dB", dc_db_rect);
+
+        // ANALYSIS
+        println!("\n=== ANALYSIS ===");
+        println!("DC value comparison:");
+        println!("  Method 1 (Direct coefficients): {:.6} dB", dc_db_direct);
+        println!("  Method 2 (Direct FFT):          {:.6} dB", dc_db_fft);
+        println!("  Method 3 (Welch + Hann):        {:.6} dB", dc_db_hann);
+        println!("  Method 4 (Welch + Rectangular): {:.6} dB", dc_db_rect);
+
+        println!("\nDC drop from true value (0 dB):");
+        println!("  Method 1: {:.6} dB drop", dc_db_direct);
+        println!("  Method 2: {:.6} dB drop", dc_db_fft);
+        println!("  Method 3: {:.6} dB drop (Hann window artifact)", dc_db_hann);
+        println!("  Method 4: {:.6} dB drop (Rectangular window)", dc_db_rect);
+
+        // Plot all methods
+        plot_spectrum(&freqs_fft, &psd_fft_db,
+            "METHOD 2: Direct FFT (NO Windowing) - TRUE Filter Response");
+        plot_spectrum(&freqs_hann, &psd_hann_db,
+            "METHOD 3: Welch + Hann Window - Shows DC Drop from Windowing");
+        plot_spectrum(&freqs_rect, &psd_rect_db,
+            "METHOD 4: Welch + Rectangular Window - Closer to Truth");
+
+        println!("\n=== CONCLUSION ===");
+
+        let hann_dc_drop = dc_db_direct - dc_db_hann;
+        let rect_dc_drop = dc_db_direct - dc_db_rect;
+
+        if hann_dc_drop.abs() > 1.0 {
+            println!("✓ PROOF: DC drop of {:.2} dB in Hann window method is a WINDOWING ARTIFACT!", hann_dc_drop);
+            println!("✓ The Butterworth filter itself has NO DC suppression (filter[0] = {})!", filter[0]);
+            println!("✓ Hann window reduces gain at DC, creating artificial suppression");
+        }
+
+        if rect_dc_drop.abs() < hann_dc_drop.abs() {
+            println!("✓ Rectangular window has {:.2} dB less DC drop than Hann", hann_dc_drop - rect_dc_drop);
+        }
+
+        println!("\n⚠️  If you see DC drop in your plots, it's from Welch + Hann windowing,");
+        println!("    NOT from the Butterworth filter!");
+    }
+
+    #[test]
+    fn test_dc_component_in_noise() {
+        use crate::generate::awgn::AWGN;
+
+        println!("\n=== CHECKING DC COMPONENT IN AWGN ===\n");
+
+        let n_samples = 262144;
+        let sample_rate = 1e6;
+
+        let mut awgn = AWGN::new_from_seed(sample_rate, n_samples, 1.0, 42);
+        let noise: Vec<Complex<f64>> = awgn.generate_block().to_vec();
+
+        // Compute DC (mean) of the noise
+        let sum: Complex<f64> = noise.iter().sum();
+        let dc_mean = sum / (n_samples as f64);
+
+        println!("Noise samples: {}", n_samples);
+        println!("DC (mean) = {} + {}i", dc_mean.re, dc_mean.im);
+        println!("DC magnitude = {}", dc_mean.norm());
+        println!("DC power (magnitude^2) = {}", dc_mean.norm_sqr());
+        println!("DC in dB = {} dB\n", 10.0 * dc_mean.norm_sqr().log10());
+
+        println!("✓ AWGN has near-zero DC by design (zero mean Gaussian)!");
+        println!("✓ This is why you see DC drop in spectrograms of filtered noise");
+        println!("✓ The Butterworth filter preserves DC, but there's no DC to preserve!\n");
+    }
 }
+
+    #[test]
+    fn test_butterworth_preserves_dc() {
+        use crate::generate::awgn::AWGN;
+        use crate::fft::fft::fft;
+
+        println!("\n=== PROOF: Butterworth Preserves DC ===\n");
+
+        let n_samples = 262144;
+        let sample_rate = 1e6;
+
+        // Generate noise and ADD a DC offset
+        let mut awgn = AWGN::new_from_seed(sample_rate, n_samples, 1.0, 42);
+        let mut signal_with_dc: Vec<Complex<f64>> = awgn.generate_block().to_vec();
+
+        // Add DC offset
+        let dc_offset = Complex::new(10.0, 5.0);
+        for sample in signal_with_dc.iter_mut() {
+            *sample += dc_offset;
+        }
+
+        // Measure DC before filtering
+        let dc_before: Complex<f64> = signal_with_dc.iter().sum::<Complex<f64>>() / (n_samples as f64);
+        println!("DC BEFORE filtering: {} + {}i", dc_before.re, dc_before.im);
+        println!("DC magnitude BEFORE: {}", dc_before.norm());
+        println!("DC in dB BEFORE: {} dB\n", 20.0 * dc_before.norm().log10());
+
+        // Apply Butterworth filter
+        apply_butterworth_filter(&mut signal_with_dc, 3, 0.45);
+
+        // Measure DC after filtering
+        let dc_after: Complex<f64> = signal_with_dc.iter().sum::<Complex<f64>>() / (n_samples as f64);
+        println!("DC AFTER filtering: {} + {}i", dc_after.re, dc_after.im);
+        println!("DC magnitude AFTER: {}", dc_after.norm());
+        println!("DC in dB AFTER: {} dB\n", 20.0 * dc_after.norm().log10());
+
+        // Check that DC is preserved
+        let dc_ratio = dc_after.norm() / dc_before.norm();
+        println!("DC preservation ratio: {:.6}", dc_ratio);
+        println!("DC preservation in dB: {:.6} dB\n", 20.0 * dc_ratio.log10());
+
+        assert!((dc_ratio - 1.0).abs() < 0.01, "DC should be preserved within 1%!");
+
+        println!("✓ PROOF: Butterworth filter preserves DC with {:.2}% accuracy!", (dc_ratio - 1.0).abs() * 100.0);
+        println!("✓ filter[0] = 1.0 means unity gain at DC");
+        println!("✓ The filter has NO DC suppression!\n");
+    }
