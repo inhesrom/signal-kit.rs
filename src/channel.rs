@@ -346,7 +346,7 @@ mod tests {
         use crate::plot::plot_spectrum;
 
         // Check if plotting is enabled
-        let plot = env::var("TEST_PLOT").unwrap_or_else(|_| "false".to_string());
+        let plot = env::var("PLOT").unwrap_or_else(|_| "false".to_string());
 
         let sample_rate = 1e6;
         let num_samples = (2.0).powf(20.0) as usize;
@@ -490,7 +490,7 @@ mod tests {
             // Plot Welch PSD
             plot_spectrum(&freqs, &psd_db, "Channel Spectrum: Two Carriers (10dB and 5dB SNR) with Shared AWGN");
         } else {
-            println!("Skipping spectrum plot (set TEST_PLOT=true to enable)");
+            println!("Skipping spectrum plot (set PLOT=true to enable)");
         }
     }
 

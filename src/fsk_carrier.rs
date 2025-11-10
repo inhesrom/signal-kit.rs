@@ -250,9 +250,9 @@ mod tests {
 
     #[test]
     fn test_fsk_with_awgn_spectrum() {
-        let plot = env::var("TEST_PLOT").unwrap_or_else(|_| "false".to_string());
+        let plot = env::var("PLOT").unwrap_or_else(|_| "false".to_string());
         if plot.to_lowercase() != "true" {
-            println!("Skipping FSK with AWGN spectrum plot (set TEST_PLOT=true to enable)");
+            println!("Skipping FSK with AWGN spectrum plot (set PLOT=true to enable)");
             return;
         }
 

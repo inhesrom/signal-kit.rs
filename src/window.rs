@@ -178,9 +178,9 @@ mod tests {
 
     #[test]
     fn test_window_shapes() {
-        let plot = env::var("TEST_PLOT").unwrap_or_else(|_| "false".to_string());
+        let plot = env::var("PLOT").unwrap_or_else(|_| "false".to_string());
         if plot.to_lowercase() != "true" {
-            println!("Skipping window shapes plot (set TEST_PLOT=true to enable)");
+            println!("Skipping window shapes plot (set PLOT=true to enable)");
             return;
         }
 
@@ -233,9 +233,9 @@ mod tests {
 
     #[test]
     fn test_window_frequency_response() {
-        let plot = env::var("TEST_PLOT").unwrap_or_else(|_| "false".to_string());
+        let plot = env::var("PLOT").unwrap_or_else(|_| "false".to_string());
         if plot.to_lowercase() != "true" {
-            println!("Skipping window frequency response plot (set TEST_PLOT=true to enable)");
+            println!("Skipping window frequency response plot (set PLOT=true to enable)");
             return;
         }
 

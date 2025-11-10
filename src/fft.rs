@@ -95,8 +95,8 @@ mod tests {
 
         let freqs: Vec<f32> = fft::fftfreqs::<f32>((-sample_rate_hz/2_f64) as f32, (sample_rate_hz/2_f64) as f32, blocksize);
 
-        let plot = env::var("TEST_PLOT").unwrap_or_else(|_| "false".to_string());
-        println!("TEST_PLOT env var is {}", plot);
+        let plot = env::var("PLOT").unwrap_or_else(|_| "false".to_string());
+        println!("PLOT env var is {}", plot);
         if plot.to_lowercase() == "true" {
             use crate::plot::plot_spectrum;
             plot_spectrum(&freqs, &cw_fft_abs, "CW Signal Spectrum");

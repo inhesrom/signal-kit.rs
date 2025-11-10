@@ -215,9 +215,9 @@ mod tests {
         use crate::fft::fft::{fft, fftshift, fftfreqs};
         use crate::vector_ops;
 
-        let plot = env::var("TEST_PLOT").unwrap_or_else(|_| "false".to_string());
+        let plot = env::var("PLOT").unwrap_or_else(|_| "false".to_string());
         if plot.to_lowercase() != "true" {
-            println!("Skipping BPSK upsample spectrum plot (set TEST_PLOT=true to enable)");
+            println!("Skipping BPSK upsample spectrum plot (set PLOT=true to enable)");
             return;
         }
 

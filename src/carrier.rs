@@ -306,9 +306,9 @@ mod tests {
         use crate::plot::plot_spectrum;
 
         // Check if plotting is enabled
-        let plot = env::var("TEST_PLOT").unwrap_or_else(|_| "false".to_string());
+        let plot = env::var("PLOT").unwrap_or_else(|_| "false".to_string());
         if plot.to_lowercase() != "true" {
-            println!("Skipping carrier combination spectrum plot (set TEST_PLOT=true to enable)");
+            println!("Skipping carrier combination spectrum plot (set PLOT=true to enable)");
             return;
         }
 
@@ -390,7 +390,7 @@ mod tests {
         let slice: &[Complex<f32>] = &channel_iq;
         let (freqs, spectrum) = welch(slice, 1e6, 2048, Some(512), Some(2048), crate::window::WindowType::Rectangular, Some(AveragingMethod::Median));
 
-        let plot = env::var("TEST_PLOT").unwrap_or_else(|_| "false".to_string());
+        let plot = env::var("PLOT").unwrap_or_else(|_| "false".to_string());
         if plot.to_lowercase() == "true" {
             plot_spectrum(&freqs, &vector_ops::to_db(&spectrum), "SNR Comparison");
         }

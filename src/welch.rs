@@ -338,9 +338,9 @@ mod tests {
 
     #[test]
     fn test_welch_cw_tone() {
-        let plot = env::var("TEST_PLOT").unwrap_or_else(|_| "false".to_string());
+        let plot = env::var("PLOT").unwrap_or_else(|_| "false".to_string());
         if plot.to_lowercase() != "true" {
-            println!("Skipping Welch CW tone plot (set TEST_PLOT=true to enable)");
+            println!("Skipping Welch CW tone plot (set PLOT=true to enable)");
             return;
         }
 
@@ -380,9 +380,9 @@ mod tests {
 
     #[test]
     fn test_welch_two_tones() {
-        let plot = env::var("TEST_PLOT").unwrap_or_else(|_| "false".to_string());
+        let plot = env::var("PLOT").unwrap_or_else(|_| "false".to_string());
         if plot.to_lowercase() != "true" {
-            println!("Skipping Welch two tones plot (set TEST_PLOT=true to enable)");
+            println!("Skipping Welch two tones plot (set PLOT=true to enable)");
             return;
         }
 
@@ -432,9 +432,9 @@ mod tests {
 
     #[test]
     fn test_welch_awgn() {
-        let plot = env::var("TEST_PLOT").unwrap_or_else(|_| "false".to_string());
+        let plot = env::var("PLOT").unwrap_or_else(|_| "false".to_string());
         if plot.to_lowercase() != "true" {
-            println!("Skipping Welch AWGN plot (set TEST_PLOT=true to enable)");
+            println!("Skipping Welch AWGN plot (set PLOT=true to enable)");
             return;
         }
 
@@ -473,9 +473,9 @@ mod tests {
 
     #[test]
     fn test_welch_fsk_signal() {
-        let plot = env::var("TEST_PLOT").unwrap_or_else(|_| "false".to_string());
+        let plot = env::var("PLOT").unwrap_or_else(|_| "false".to_string());
         if plot.to_lowercase() != "true" {
-            println!("Skipping Welch FSK signal plot (set TEST_PLOT=true to enable)");
+            println!("Skipping Welch FSK signal plot (set PLOT=true to enable)");
             return;
         }
 
@@ -541,9 +541,9 @@ mod tests {
 
     #[test]
     fn test_welch_psk_signal() {
-        let plot = env::var("TEST_PLOT").unwrap_or_else(|_| "false".to_string());
+        let plot = env::var("PLOT").unwrap_or_else(|_| "false".to_string());
         if plot.to_lowercase() != "true" {
-            println!("Skipping Welch PSK signal plot (set TEST_PLOT=true to enable)");
+            println!("Skipping Welch PSK signal plot (set PLOT=true to enable)");
             return;
         }
 
@@ -593,9 +593,9 @@ mod tests {
 
     #[test]
     fn test_welch_window_comparison() {
-        let plot = env::var("TEST_PLOT").unwrap_or_else(|_| "false".to_string());
+        let plot = env::var("PLOT").unwrap_or_else(|_| "false".to_string());
         if plot.to_lowercase() != "true" {
-            println!("Skipping Welch window comparison plot (set TEST_PLOT=true to enable)");
+            println!("Skipping Welch window comparison plot (set PLOT=true to enable)");
             return;
         }
 
@@ -698,9 +698,9 @@ mod tests {
 
     #[test]
     fn test_welch_averaging_comparison() {
-        let plot = env::var("TEST_PLOT").unwrap_or_else(|_| "false".to_string());
+        let plot = env::var("PLOT").unwrap_or_else(|_| "false".to_string());
         if plot.to_lowercase() != "true" {
-            println!("Skipping Welch averaging comparison plot (set TEST_PLOT=true to enable)");
+            println!("Skipping Welch averaging comparison plot (set PLOT=true to enable)");
             return;
         }
 
@@ -817,9 +817,9 @@ mod tests {
 
     #[test]
     fn test_welch_parameter_effects() {
-        let plot = env::var("TEST_PLOT").unwrap_or_else(|_| "false".to_string());
+        let plot = env::var("PLOT").unwrap_or_else(|_| "false".to_string());
         if plot.to_lowercase() != "true" {
-            println!("Skipping Welch parameter effects plot (set TEST_PLOT=true to enable)");
+            println!("Skipping Welch parameter effects plot (set PLOT=true to enable)");
             return;
         }
 
@@ -920,9 +920,9 @@ mod tests {
 
     #[test]
     fn test_welch_overlap_effects() {
-        let plot = env::var("TEST_PLOT").unwrap_or_else(|_| "false".to_string());
+        let plot = env::var("PLOT").unwrap_or_else(|_| "false".to_string());
         if plot.to_lowercase() != "true" {
-            println!("Skipping Welch overlap effects plot (set TEST_PLOT=true to enable)");
+            println!("Skipping Welch overlap effects plot (set PLOT=true to enable)");
             return;
         }
 

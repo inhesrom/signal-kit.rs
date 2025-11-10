@@ -288,8 +288,8 @@ mod tests {
 
         assert_eq!(all_samples.len(), block_size * num_blocks);
 
-        let plot = env::var("TEST_PLOT").unwrap_or_else(|_| "false".to_string());
-        println!("\nTEST_PLOT env var is {}", plot);
+        let plot = env::var("PLOT").unwrap_or_else(|_| "false".to_string());
+        println!("\nPLOT env var is {}", plot);
         if plot.to_lowercase() == "true" {
             // Convert to Vec for FFT
             let mut samples_vec: Vec<_> = (0..all_samples.len())
@@ -326,9 +326,9 @@ mod tests {
         use plotly::{Plot, Scatter};
         use plotly::common::Mode;
 
-        let plot_env = env::var("TEST_PLOT").unwrap_or_else(|_| "false".to_string());
+        let plot_env = env::var("PLOT").unwrap_or_else(|_| "false".to_string());
         if plot_env.to_lowercase() != "true" {
-            println!("Skipping symbols constellation plot (set TEST_PLOT=true to enable)");
+            println!("Skipping symbols constellation plot (set PLOT=true to enable)");
             return;
         }
 
@@ -426,9 +426,9 @@ mod tests {
         let energy: f64 = (0..filter.len()).map(|i| filter[i].re * filter[i].re).sum();
         println!("\nFilter energy (sum of squared taps): {:.6}", energy);
 
-        let plot_env = env::var("TEST_PLOT").unwrap_or_else(|_| "false".to_string());
+        let plot_env = env::var("PLOT").unwrap_or_else(|_| "false".to_string());
         if plot_env.to_lowercase() != "true" {
-            println!("Set TEST_PLOT=true to see frequency response plot");
+            println!("Set PLOT=true to see frequency response plot");
             return;
         }
 
