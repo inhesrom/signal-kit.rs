@@ -42,8 +42,11 @@ pub fn create_butterworth_filter<T: Float>(num_samples: usize, order: i32, cutof
 /// * `cutoff` - Normalized cutoff frequency (0.0 to 0.5)
 ///
 /// # Example
-/// ```ignore
-/// let mut iq = generate_iq_noise(100_000, -97.0);
+/// ```
+/// use signal_kit::filter::butterworth::apply_butterworth_filter;
+/// use num_complex::Complex;
+/// 
+/// let mut iq = vec![Complex::new(1.0, 0.5); 100_000];
 /// apply_butterworth_filter(&mut iq, 3, 0.45);  // 3rd order, cutoff at 0.45*Nyquist
 /// ```
 pub fn apply_butterworth_filter<T>(signal: &mut [Complex<T>], order: i32, cutoff: T)

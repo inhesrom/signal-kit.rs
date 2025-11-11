@@ -21,8 +21,9 @@ use num_traits::Float;
 /// power spectral density (in dB or linear units).
 ///
 /// # Example with Impairments
-/// ```ignore
-/// use signal_kit::{Carrier, Channel, ModType, generate::Impairment};
+/// ```
+/// use signal_kit::{Carrier, Channel, ModType};
+/// use signal_kit::generate::Impairment;
 ///
 /// let carrier1 = Carrier::new(ModType::_QPSK, 0.1, 0.1, 10.0, 0.35, 1e6, Some(42));
 /// let carrier2 = Carrier::new(ModType::_QPSK, 0.1, -0.1, 10.0, 0.35, 1e6, Some(43));

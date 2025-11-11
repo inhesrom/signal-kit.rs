@@ -13,8 +13,10 @@ use num_traits::Float;
 /// Supports PSK/QAM modulation, FSK, and CW (continuous wave) unmodulated signals.
 ///
 /// # Example
-/// ```ignore
-/// let mut carrier = Carrier::new(
+/// ```
+/// use signal_kit::{Carrier, ModType};
+/// 
+/// let carrier = Carrier::new(
 ///     ModType::_QPSK,      // Modulation type
 ///     0.1,                  // Normalized bandwidth (0.0-1.0)
 ///     0.1,                  // Normalized center frequency (-0.5 to 0.5)
@@ -23,7 +25,7 @@ use num_traits::Float;
 ///     1e6,                  // Sample rate in Hz
 ///     Some(42),             // Optional seed for reproducibility
 /// );
-/// let iq_samples = carrier.generate(1000);
+/// let iq_samples = carrier.generate::<f64>(1000);
 /// ```
 #[derive(Clone)]
 pub struct Carrier {

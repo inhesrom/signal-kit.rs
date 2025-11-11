@@ -43,7 +43,9 @@ impl<T: Float> FskCarrier<T> {
     /// A new FskCarrier instance
     ///
     /// # Example
-    /// ```ignore
+    /// ```
+    /// use signal_kit::generate::fsk_carrier::FskCarrier;
+    /// 
     /// // Create 1 MHz sample rate, 100 kHz symbol rate, 250 kHz carrier
     /// // with 50 kHz deviation (frequencies at 225 kHz and 275 kHz)
     /// let fsk: FskCarrier<f64> = FskCarrier::new(1e6, 1e5, 2.5e5, 5e4, 1024, Some(42));

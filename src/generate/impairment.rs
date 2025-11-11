@@ -66,7 +66,7 @@ use crate::fft::{fft, ifft};
 /// amplitude variations. Each variant can be applied independently or in combination.
 ///
 /// # Example
-/// ```ignore
+/// ```
 /// use signal_kit::generate::Impairment;
 ///
 /// let droop = Impairment::DigitizerDroopAD9361;
@@ -192,8 +192,9 @@ pub fn frequency_dependent_amplitude_variation<T: Float>(num_samples: usize, amp
 ///   - Lower values = more droop at band edges
 ///
 /// # Example
-/// ```ignore
+/// ```
 /// use signal_kit::generate::impairment::apply_digitizer_droop;
+/// use num_complex::Complex;
 /// 
 /// let mut iq_samples = vec![Complex::new(1.0, 0.5); 10000];
 /// 

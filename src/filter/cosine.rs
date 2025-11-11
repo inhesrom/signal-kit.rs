@@ -20,7 +20,9 @@ use rustfft::FftPlanner;
 /// Vector of frequency-domain filter coefficients
 ///
 /// # Example
-/// ```ignore
+/// ```
+/// use signal_kit::filter::cosine::create_cosine_taper_filter;
+/// 
 /// // Passband: 0-40% of Nyquist (flat, unity gain)
 /// // Transition: 40-48% of Nyquist (smooth cosine rolloff)
 /// // Stopband: 48-50% of Nyquist (zero gain)
@@ -74,7 +76,7 @@ pub fn create_cosine_taper_filter(num_samples: usize, passband_end: f64, stopban
 /// * `stopband_start` - Start of stopband (0.0 to 0.5, must be > passband_end)
 ///
 /// # Example
-/// ```ignore
+/// ```
 /// use signal_kit::filter::cosine::apply_cosine_taper_filter;
 /// use num_complex::Complex;
 ///
@@ -124,8 +126,9 @@ pub fn apply_cosine_taper_filter(signal: &mut [Complex<f64>], passband_end: f64,
 /// This mimics realistic digitizer anti-aliasing behavior without DC suppression.
 ///
 /// # Example
-/// ```ignore
+/// ```
 /// use signal_kit::filter::cosine::apply_cosine_taper_digitizer;
+/// use num_complex::Complex;
 /// 
 /// let mut iq_samples = vec![Complex::new(1.0, 0.0); 10000];
 /// apply_cosine_taper_digitizer(&mut iq_samples);
