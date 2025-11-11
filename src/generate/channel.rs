@@ -570,7 +570,7 @@ mod tests {
         let plot = env::var("PLOT").unwrap_or_else(|_| "false".to_string());
 
         let sample_rate = 1e6;
-        let num_samples = 1000000;
+        let num_samples = 1_000_000;
 
         let carrier = Carrier::new(
             ModType::_QPSK,
@@ -579,28 +579,43 @@ mod tests {
             10.0,
             0.35,
             sample_rate,
-            Some(42),
+            Some(1),
         );
 
-        let mut channel = Channel::new(vec![carrier]);
-        channel.set_noise_floor_db(-5.0);
+        let carrier2 = Carrier::new(
+            ModType::_QPSK,
+            0.05,
+            -0.25,
+            3.0,
+            0.20,
+            sample_rate,
+            Some(2),
+        );
+        
+        let carrier3 = Carrier::new(
+            ModType::_QPSK,
+            0.02,
+            0.2,
+            5.0,
+            0.15,
+            sample_rate,
+            Some(3),
+        );
+
+        let mut channel = Channel::new(vec![carrier, carrier2, carrier3]);
+        channel.set_noise_floor_db(-50.0);
         channel.set_seed(998);
 
         // Add multiple impairments
         channel.add_impairment(Impairment::DigitizerDroopAD9361);
         channel.add_impairment(Impairment::FrequencyVariation {
             amplitude_db: 0.5,
-            cycles: 2.0,
-            phase_offset: 1.0,
+            cycles: 5.0,
+            phase_offset: 0.0,
         });
 
         let result = channel.generate::<f64>(num_samples);
         assert_eq!(result.len(), num_samples);
-
-        println!("\n=== Channel with Multiple Impairments ===");
-        println!("Impairments applied:");
-        println!("  1. CosineTaperDigitizer (cosine taper, passband=0-42%, transition=42-48%)");
-        println!("  2. FrequencyVariation (amplitude=1.0 dB, cycles=2.0)");
 
         // Only plot if enabled
         if plot.to_lowercase() == "true" {
