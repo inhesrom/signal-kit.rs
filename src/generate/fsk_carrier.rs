@@ -171,7 +171,7 @@ impl<T: Float> FskCarrier<T> {
 mod tests {
     use super::*;
     use crate::generate::awgn::AWGN;
-    use crate::fft::fft::{fft, fftshift, fftfreqs};
+    use crate::fft::{fft, fftshift, fftfreqs};
     use crate::vector_ops;
     use std::env;
 

@@ -38,7 +38,7 @@ impl CW {
 mod tests {
     use super::*;
     use std::env;
-    use crate::fft::fft;
+    use crate::fft;
     use crate::complex_vec::ComplexVec;
 
     #[test]

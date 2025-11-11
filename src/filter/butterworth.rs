@@ -312,11 +312,11 @@ mod tests {
             .collect();
 
         // FFT shift for centered plotting
-        use crate::fft::fft::fftshift;
+        use crate::fft::fftshift;
         fftshift(&mut magnitude_db);
 
         // Get frequency axis
-        use crate::fft::fft::fftfreqs;
+        use crate::fft::fftfreqs;
         let freqs: Vec<f64> = fftfreqs(-sample_rate/2.0, sample_rate/2.0, n_samples);
 
         plot_spectrum(&freqs, &magnitude_db, "Butterworth 3rd Order - Impulse Response (FFT-based)");
@@ -335,7 +335,7 @@ mod tests {
         use crate::spectrum::window::WindowType;
         use crate::vector_ops;
         use crate::plot::plot_spectrum;
-        use crate::fft::fft::{fft, fftshift, fftfreqs};
+        use crate::fft::{fft, fftshift, fftfreqs};
 
         let plot = env::var("PLOT").unwrap_or_else(|_| "false".to_string());
         if plot.to_lowercase() != "true" {
@@ -506,7 +506,7 @@ mod tests {
     #[test]
     fn test_butterworth_preserves_dc() {
         use crate::generate::awgn::AWGN;
-        use crate::fft::fft::fft;
+        use crate::fft::fft;
 
         println!("\n=== PROOF: Butterworth Preserves DC ===\n");
 

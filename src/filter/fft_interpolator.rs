@@ -6,7 +6,7 @@ use num_traits::cast::FromPrimitive;
 use std::fmt::Debug;
 use std::ops::{RemAssign, DivAssign};
 use crate::complex_vec::ComplexVec;
-use crate::fft::fft::{fft, ifft};
+use crate::fft::{fft, ifft};
 
 /// Resample a signal using FFT-based interpolation (similar to scipy.signal.resample)
 ///
@@ -212,7 +212,7 @@ mod tests {
         use std::env;
         use crate::generate::psk_carrier::PskCarrier;
         use crate::mod_type::ModType;
-        use crate::fft::fft::{fft, fftshift, fftfreqs};
+        use crate::fft::{fft, fftshift, fftfreqs};
         use crate::vector_ops;
 
         let plot = env::var("PLOT").unwrap_or_else(|_| "false".to_string());

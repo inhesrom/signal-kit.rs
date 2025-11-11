@@ -222,7 +222,7 @@ impl<T: Float> PskCarrier<T> {
 mod tests {
     use super::*;
     use std::env;
-    use crate::fft::fft::{fft, fftshift, fftfreqs};
+    use crate::fft::{fft, fftshift, fftfreqs};
     use crate::vector_ops;
 
     #[test]
@@ -392,7 +392,7 @@ mod tests {
     #[test]
     fn test_rrc_filter_frequency_response() {
         use std::env;
-        use crate::fft::fft::{fft, fftshift, fftfreqs};
+        use crate::fft::{fft, fftshift, fftfreqs};
         use crate::vector_ops;
 
         let sample_rate_hz = 1e6_f64;

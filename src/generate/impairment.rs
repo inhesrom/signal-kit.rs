@@ -58,7 +58,7 @@ use std::f64::consts::PI;
 use crate::filter::butterworth::apply_butterworth_filter;
 use crate::filter::cosine::{apply_cosine_taper_filter, apply_cosine_taper_digitizer};
 use crate::vector_ops::to_linear;
-use crate::fft::fft::{fft, ifft};
+use crate::fft::{fft, ifft};
 
 /// Channel impairment types that can be applied to signals
 ///
@@ -241,7 +241,7 @@ pub fn apply_digitizer_droop_traditional(signal: &mut [Complex<f64>]) {
 
 #[cfg(test)]
 mod tests {
-    use crate::{ComplexVec, generate::awgn::AWGN, generate::impairment::frequency_dependent_amplitude_variation, vector_ops::{add, to_linear}, fft::fft, spectrum::welch::welch, spectrum::window::WindowType, plot::plot_spectrum, vector_ops};
+    use crate::{ComplexVec, generate::awgn::AWGN, generate::impairment::frequency_dependent_amplitude_variation, vector_ops::{add, to_linear}, fft, spectrum::welch::welch, spectrum::window::WindowType, plot::plot_spectrum, vector_ops};
     use rand::{Rng, SeedableRng, rngs::StdRng};
     use num_complex::Complex;
     use super::{apply_digitizer_droop, apply_digitizer_droop_ad9361, apply_digitizer_droop_traditional};

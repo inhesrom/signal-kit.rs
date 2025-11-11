@@ -3,7 +3,7 @@
 use num_complex::Complex;
 use num_traits::Float;
 use crate::spectrum::window::{WindowType, generate_window, window_energy};
-use crate::fft::fft::{fft, fftfreqs, fftshift};
+use crate::fft::{fft, fftfreqs, fftshift};
 
 /// Averaging method for combining periodograms
 #[derive(Debug, Clone, Copy, PartialEq)]

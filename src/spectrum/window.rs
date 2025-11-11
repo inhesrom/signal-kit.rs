@@ -242,7 +242,7 @@ mod tests {
         println!("\n=== Window Frequency Response Test ===");
 
         use num_complex::Complex;
-        use crate::fft::fft::{fft, fftshift, fftfreqs};
+        use crate::fft::{fft, fftshift, fftfreqs};
         use crate::vector_ops;
 
         let size = 1024;
