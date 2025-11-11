@@ -41,17 +41,8 @@ pub mod fft {
 
     pub fn fftshift<T>(input_vec: &mut [T]) {
         let n = input_vec.len();
-        if n % 2 == 0 { // even length
-            // Swap first n/2 elements with last n/2 elements, but leave the n/2 element (Nyquist) in place
-            for i in 0..(n/2 - 1) {
-                input_vec.swap(i, i + n/2 + 1);
-            }
-        } else { // odd length
-            // Swap first (n-1)/2 elements with last (n-1)/2 eleme;ts
-            for i in 0..(n/2) {
-                input_vec.swap(i, i + (n + 1)/2);
-            }
-        }
+        let mid = (n + 1) / 2;
+        input_vec.rotate_left(mid);
     }
 
     pub fn fftfreqs<T: Float>(start: T, stop: T, num_points: usize) -> Vec<T> {
@@ -68,8 +59,9 @@ pub mod fft {
 #[cfg(test)]
 mod tests {
     use num_complex::{Complex};
+    use num_traits::FromBytes;
     use num_traits::{Float};
-    use std::env;
+    use std::{env, vec};
 
     use crate::complex_vec::ComplexVec;
     use crate::generate::cw::CW;
@@ -138,11 +130,39 @@ mod tests {
     }
 
     #[test]
-    fn test_fftshift() {
+    fn test_fftshift_even() {
         let vec_initial = vec![0, 1, 2, 3, 4, 5, 6, 7];
         let mut vec_shifted = vec_initial.clone();
         fft::fftshift(&mut vec_shifted);
-        assert_eq!(vec_shifted, vec![5, 6, 7, 3, 4, 0, 1, 2]);
+        assert_eq!(vec_shifted, vec![4, 5, 6, 7, 0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn test_fftshift_odd() {
+        let vec_initial = vec![0, 1, 2, 3, 4, 5, 6, 7, 8];
+        let mut vec_shifted = vec_initial.clone();
+        fft::fftshift(&mut vec_shifted);
+        assert_eq!(vec_shifted, vec![5, 6, 7, 8, 0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_fftshift_cw_even() {
+        let vec_cw = vec![Complex::new(1.0_f32, 0.0_f32); 10];
+        let mut vec_cv = ComplexVec::<f32>::from_vec(vec_cw);
+        fft::fft(&mut vec_cv);
+        fft::fftshift(&mut vec_cv);
+        vec_cv.iter().for_each(|c| println!("{c}"));
+        assert_eq!(vec_cv[5].norm(), 1.0);
+    }
+
+    #[test]
+    fn test_fftshift_cw_odd() {
+        let vec_cw = vec![Complex::new(1.0_f32, 0.0_f32); 9];
+        let mut vec_cv = ComplexVec::<f32>::from_vec(vec_cw);
+        fft::fft(&mut vec_cv);
+        fft::fftshift(&mut vec_cv);
+        vec_cv.iter().for_each(|c| println!("{c}"));
+        assert_eq!(vec_cv[4].norm(), 1.0);
     }
 
     #[test]
