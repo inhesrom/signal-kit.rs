@@ -592,7 +592,7 @@ mod tests {
             sample_rate,
             Some(2),
         );
-        
+
         let carrier3 = Carrier::new(
             ModType::_QPSK,
             0.02,
@@ -656,7 +656,7 @@ mod tests {
         let plot = env::var("PLOT").unwrap_or_else(|_| "false".to_string());
 
         let sample_rate = 1e6;
-        let num_samples = 10000;
+        let num_samples = 25000;
 
         let carrier = Carrier::new(
             ModType::_QPSK,
@@ -669,13 +669,13 @@ mod tests {
         );
 
         let mut channel = Channel::new(vec![carrier]);
-        channel.set_noise_floor_db(-100.0);
+        channel.set_noise_floor_db(-50.0);
         channel.set_seed(999);
 
         // Add custom digitizer droop (4th order, higher cutoff)
         channel.add_impairment(Impairment::DigitizerDroop {
-            order: 4,
-            cutoff: 0.48,
+            order: 9,
+            cutoff: 0.45,
         });
 
         let result = channel.generate::<f64>(num_samples);
@@ -683,8 +683,8 @@ mod tests {
 
         println!("\n=== Channel with Custom Digitizer Droop ===");
         println!("Digitizer Droop Configuration:");
-        println!("  Order: 4");
-        println!("  Cutoff: 0.48 Nyquist");
+        println!("  Order: 9");
+        println!("  Cutoff: 0.45 Nyquist");
         println!("  (Steeper rolloff than AD9361, but not as steep as traditional)");
 
         // Only plot if enabled
@@ -696,7 +696,7 @@ mod tests {
             let (freqs, psd) = welch(
                 &signal,
                 sample_rate,
-                1024,
+                2048,
                 None,
                 None,
                 WindowType::Hann,
