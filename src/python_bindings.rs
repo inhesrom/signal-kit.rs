@@ -1,11 +1,23 @@
 #![cfg(feature = "python")]
 
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 use numpy::{PyArray1, IntoPyArray};
 use num_complex::Complex;
 use crate::{Carrier, Channel, ModType};
+use crate::generate::Impairment;
 
 /// Helper function to parse modulation type from string
+///
+/// Supports the following modulation types (case-insensitive):
+///   - BPSK: Binary Phase Shift Keying
+///   - QPSK: Quadrature Phase Shift Keying
+///   - 8PSK: 8-ary Phase Shift Keying
+///   - 16APSK: 16-ary Amplitude-Phase Shift Keying
+///   - 16QAM: 16-ary Quadrature Amplitude Modulation
+///   - 32QAM: 32-ary Quadrature Amplitude Modulation
+///   - 64QAM: 64-ary Quadrature Amplitude Modulation
+///   - CW: Continuous Wave (unmodulated carrier)
 fn parse_modulation(mod_str: &str) -> PyResult<ModType> {
     match mod_str.to_uppercase().as_str() {
         "BPSK" => Ok(ModType::_BPSK),
@@ -18,11 +30,137 @@ fn parse_modulation(mod_str: &str) -> PyResult<ModType> {
         "CW" => Ok(ModType::_CW),
         _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
             format!(
-                "Unknown modulation type: {}. Supported types: BPSK, QPSK, 8PSK, 16APSK, 16QAM, 32QAM, 64QAM, CW",
+                "Unknown modulation type: '{}'. Supported types (case-insensitive):\n  \
+                 BPSK (Binary PSK), QPSK (Quadrature PSK), 8PSK, 16APSK, \n  \
+                 16QAM, 32QAM, 64QAM, CW (Continuous Wave)",
                 mod_str
             ),
         )),
     }
+}
+
+/// Helper function to parse impairment configuration from Python
+///
+/// Accepts either a string shorthand or a dictionary with detailed parameters.
+///
+/// String formats:
+///     "digitizer_droop_ad9361" - 3rd order, 0.45 cutoff (AD9361 SDR style)
+///     "digitizer_droop_traditional" - 6th order, 0.42 cutoff (traditional)
+///     "cosine_taper_digitizer" - cosine taper, 0.42-0.48 transition
+///
+/// Dictionary format:
+///     {"type": "digitizer_droop", "order": 3, "cutoff": 0.45}
+///     {"type": "frequency_variation", "amplitude_db": 1.0, "cycles": 3.0, "phase_offset": 0.0}
+///     {"type": "cosine_taper", "passband_end": 0.42, "stopband_start": 0.48}
+fn parse_impairment(config: &Bound<PyAny>) -> PyResult<Impairment> {
+    // Try as string first
+    if let Ok(s) = config.extract::<String>() {
+        return match s.to_lowercase().as_str() {
+            "digitizer_droop_ad9361" => Ok(Impairment::DigitizerDroopAD9361),
+            "digitizer_droop_traditional" => Ok(Impairment::DigitizerDroopTraditional),
+            "cosine_taper_digitizer" => Ok(Impairment::CosineTaperDigitizer),
+            _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                format!(
+                    "Unknown impairment: '{}'. Supported strings: digitizer_droop_ad9361, digitizer_droop_traditional, cosine_taper_digitizer. Or use a dict with 'type' key.",
+                    s
+                ),
+            )),
+        };
+    }
+
+    // Try as dictionary
+    if let Ok(dict) = config.downcast::<PyDict>() {
+        let impairment_type: String = dict
+            .get_item("type")?
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Dictionary must have 'type' key",
+            ))?
+            .extract()?;
+
+        return match impairment_type.to_lowercase().as_str() {
+            "digitizer_droop" => {
+                let order: i32 = dict
+                    .get_item("order")?
+                    .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "'digitizer_droop' requires 'order' parameter",
+                    ))?
+                    .extract()?;
+                let cutoff: f64 = dict
+                    .get_item("cutoff")?
+                    .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "'digitizer_droop' requires 'cutoff' parameter",
+                    ))?
+                    .extract()?;
+
+                if !(0.0..=0.5).contains(&cutoff) {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "cutoff must be in range [0.0, 0.5]",
+                    ));
+                }
+
+                Ok(Impairment::DigitizerDroop { order, cutoff })
+            }
+            "frequency_variation" => {
+                let amplitude_db: f64 = dict
+                    .get_item("amplitude_db")?
+                    .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "'frequency_variation' requires 'amplitude_db' parameter",
+                    ))?
+                    .extract()?;
+                let cycles: f64 = dict
+                    .get_item("cycles")?
+                    .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "'frequency_variation' requires 'cycles' parameter",
+                    ))?
+                    .extract()?;
+                let phase_offset: f64 = match dict.get_item("phase_offset") {
+                    Ok(Some(v)) => v.extract().unwrap_or(0.0),
+                    _ => 0.0,
+                };
+
+                Ok(Impairment::FrequencyVariation {
+                    amplitude_db,
+                    cycles,
+                    phase_offset,
+                })
+            }
+            "cosine_taper" => {
+                let passband_end: f64 = dict
+                    .get_item("passband_end")?
+                    .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "'cosine_taper' requires 'passband_end' parameter",
+                    ))?
+                    .extract()?;
+                let stopband_start: f64 = dict
+                    .get_item("stopband_start")?
+                    .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "'cosine_taper' requires 'stopband_start' parameter",
+                    ))?
+                    .extract()?;
+
+                if stopband_start <= passband_end {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "stopband_start must be greater than passband_end",
+                    ));
+                }
+
+                Ok(Impairment::CosineTaper {
+                    passband_end,
+                    stopband_start,
+                })
+            }
+            _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                format!(
+                    "Unknown impairment type: '{}'. Supported types: digitizer_droop, frequency_variation, cosine_taper",
+                    impairment_type
+                ),
+            )),
+        };
+    }
+
+    Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+        "Impairment config must be a string or dictionary",
+    ))
 }
 
 /// Python wrapper for the Carrier struct
@@ -260,6 +398,33 @@ impl PythonChannel {
     /// Get the number of carriers in this channel
     fn num_carriers(&self) -> usize {
         self.inner.num_carriers()
+    }
+
+    /// Add a channel impairment (e.g., digitizer droop, frequency variation)
+    ///
+    /// Impairments are applied to the combined signal after noise addition.
+    /// Multiple impairments can be added and will be applied sequentially.
+    ///
+    /// Parameters:
+    ///     impairment: Either a string shorthand or a dictionary with parameters
+    ///
+    /// String examples:
+    ///     "digitizer_droop_ad9361" - 3rd order, 0.45 cutoff (AD9361 SDR style)
+    ///     "digitizer_droop_traditional" - 6th order, 0.42 cutoff (high-quality)
+    ///     "cosine_taper_digitizer" - cosine taper, 0.42-0.48 transition
+    ///
+    /// Dictionary examples:
+    ///     {"type": "digitizer_droop", "order": 3, "cutoff": 0.45}
+    ///     {"type": "frequency_variation", "amplitude_db": 1.0, "cycles": 3.0, "phase_offset": 0.0}
+    ///     {"type": "cosine_taper", "passband_end": 0.42, "stopband_start": 0.48}
+    ///
+    /// Example:
+    ///     >>> channel.add_impairment("digitizer_droop_ad9361")
+    ///     >>> channel.add_impairment({"type": "frequency_variation", "amplitude_db": 1.0, "cycles": 3.0})
+    fn add_impairment(&mut self, py: Python, impairment: &Bound<PyAny>) -> PyResult<()> {
+        let imp = parse_impairment(impairment)?;
+        self.inner.add_impairment(imp);
+        Ok(())
     }
 }
 
