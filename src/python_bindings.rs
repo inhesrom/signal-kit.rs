@@ -2,10 +2,11 @@
 
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
-use numpy::{PyArray1, IntoPyArray};
+use numpy::{PyArray1, IntoPyArray, PyReadonlyArray1};
 use num_complex::Complex;
 use crate::{Carrier, Channel, ModType};
 use crate::generate::Impairment;
+use crate::spectrum::{welch as welch_impl, WindowType, AveragingMethod};
 
 /// Helper function to parse modulation type from string
 ///
@@ -428,11 +429,97 @@ impl PythonChannel {
     }
 }
 
+/// Helper function to parse window type from string
+fn parse_window_type(window_str: &str) -> PyResult<WindowType> {
+    match window_str.to_lowercase().as_str() {
+        "hann" => Ok(WindowType::Hann),
+        "hamming" => Ok(WindowType::Hamming),
+        "blackman" => Ok(WindowType::Blackman),
+        "rectangular" | "rect" => Ok(WindowType::Rectangular),
+        _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            format!(
+                "Unknown window type: '{}'. Supported types: hann, hamming, blackman, rectangular",
+                window_str
+            ),
+        )),
+    }
+}
+
+/// Welch's method for power spectral density estimation
+///
+/// Estimates the power spectral density by dividing the signal into overlapping
+/// segments, computing modified periodograms, and averaging them.
+///
+/// Parameters:
+///     signal (numpy.ndarray): Input complex-valued signal
+///     sample_rate (float): Sampling frequency in Hz
+///     nperseg (int): Segment length for FFT
+///     noverlap (int, optional): Number of samples to overlap between segments (default: nperseg/2)
+///     nfft (int, optional): FFT length for zero-padding (default: nperseg)
+///     window (str, optional): Window function type - "hann", "hamming", "blackman", "rectangular" (default: "hann")
+///
+/// Returns:
+///     tuple: (frequencies, psd) where both are numpy arrays (float64)
+///            frequencies are in Hz from -fs/2 to +fs/2
+///            psd is in power/Hz
+///
+/// Example:
+///     >>> import signal_kit
+///     >>> import numpy as np
+///     >>> signal = np.random.randn(10000) + 1j * np.random.randn(10000)
+///     >>> freqs, psd = signal_kit.welch(signal, sample_rate=1e6, nperseg=2048)
+#[pyfunction]
+#[pyo3(signature = (signal, sample_rate, nperseg, noverlap=None, nfft=None, window="hann"))]
+fn welch(
+    py: Python,
+    signal: PyReadonlyArray1<Complex<f64>>,
+    sample_rate: f64,
+    nperseg: usize,
+    noverlap: Option<usize>,
+    nfft: Option<usize>,
+    window: &str,
+) -> PyResult<(Py<PyArray1<f64>>, Py<PyArray1<f64>>)> {
+    // Validate parameters
+    if nperseg == 0 {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "nperseg must be greater than 0",
+        ));
+    }
+    if sample_rate <= 0.0 {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "sample_rate must be positive",
+        ));
+    }
+
+    let window_type = parse_window_type(window)?;
+
+    // Extract signal from numpy array
+    let signal_vec: Vec<Complex<f64>> = signal.as_array().to_vec();
+
+    // Call the Rust implementation
+    let (freqs, psd) = welch_impl(
+        &signal_vec,
+        sample_rate,
+        nperseg,
+        noverlap,
+        nfft,
+        window_type,
+        None, // Use default averaging method (Mean)
+    );
+
+    // Convert results to numpy arrays
+    let freqs_array = freqs.into_pyarray_bound(py);
+    let psd_array = psd.into_pyarray_bound(py);
+
+    Ok((freqs_array.into(), psd_array.into()))
+}
+
 /// Initialize the Python module
 #[pymodule]
 fn _signal_kit(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PythonCarrier>()?;
     m.add_class::<PythonChannel>()?;
+    m.add_function(wrap_pyfunction!(welch, m)?)?;
     m.add("__version__", "0.1.0")?;
 
     Ok(())
