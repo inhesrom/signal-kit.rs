@@ -1,4 +1,5 @@
 // Core data structures and utilities
+pub mod caf;
 pub mod complex_vec;
 pub mod fft;
 pub mod mod_type;
@@ -19,6 +20,10 @@ pub use complex_vec::ComplexVec;
 pub use mod_type::ModType;
 
 // Re-export commonly used items from submodules
+pub use caf::{
+    compute_caf, find_peak, interpolate_peak, CafParams, CafSurface, InterpolationMethod, Peak,
+    RefinedPeak,
+};
 pub use generate::{Carrier, Channel};
 
 #[cfg(feature = "python")]

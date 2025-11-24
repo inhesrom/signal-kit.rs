@@ -1,0 +1,1017 @@
+//! Cross Ambiguity Function (CAF) for TDOA and Doppler estimation
+//!
+//! This module provides efficient FFT-based CAF computation with parallel
+//! processing, peak detection, and interpolation methods.
+
+use num_complex::Complex;
+use num_traits::{Float, FromPrimitive, Signed};
+use rayon::prelude::*;
+use std::fmt::Debug;
+use std::ops::{DivAssign, RemAssign};
+use std::sync::{Arc, Mutex};
+
+use crate::fft::{fft, ifft};
+
+/// Interpolation method for peak refinement
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum InterpolationMethod {
+    /// 2D Parabolic interpolation (fast, good for smooth peaks)
+    Parabolic2D,
+    /// 2D Sinc interpolation (more accurate, computationally expensive)
+    Sinc2D,
+    /// No interpolation
+    None,
+}
+
+/// Parameters for CAF computation
+#[derive(Debug, Clone)]
+pub struct CafParams {
+    /// Time step for downsampling (1 = fine mode, >1 = coarse mode)
+    pub time_step: usize,
+    /// Frequency resolution for Doppler search (Hz)
+    pub freq_step_hz: f64,
+    /// Maximum Doppler shift to search (+/- Hz)
+    pub max_doppler_hz: f64,
+    /// Sample rate of signals (Hz)
+    pub sample_rate_hz: f64,
+}
+
+/// CAF surface representation
+#[derive(Debug, Clone)]
+pub struct CafSurface<T: Float> {
+    /// 2D array: surface[doppler_idx][time_idx]
+    pub surface: Vec<Vec<T>>,
+    /// Time delay values (samples)
+    pub time_delays: Vec<T>,
+    /// Doppler shift values (Hz)
+    pub doppler_shifts: Vec<T>,
+}
+
+/// Coarse peak location
+#[derive(Debug, Clone)]
+pub struct Peak {
+    /// Peak magnitude
+    pub magnitude: f64,
+    /// Time delay index
+    pub delay_idx: usize,
+    /// Doppler shift index
+    pub doppler_idx: usize,
+    /// Time delay (samples)
+    pub delay_samples: f64,
+    /// Doppler shift (Hz)
+    pub doppler_hz: f64,
+}
+
+/// Refined peak with sub-sample accuracy
+#[derive(Debug, Clone)]
+pub struct RefinedPeak {
+    /// Peak magnitude
+    pub magnitude: f64,
+    /// Time delay with sub-sample precision (samples)
+    pub delay_samples: f64,
+    /// Doppler shift with sub-bin precision (Hz)
+    pub doppler_hz: f64,
+}
+
+/// Compute Cross Ambiguity Function using FFT-based algorithm
+///
+/// Uses rayon for parallel processing across Doppler frequencies.
+/// For each Doppler shift:
+///   1. Apply frequency shift to reference signal
+///   2. FFT both signals
+///   3. Multiply conjugate in frequency domain
+///   4. IFFT to get correlation
+///
+/// # Arguments
+/// * `signal1` - Reference signal (complex samples)
+/// * `signal2` - Target signal (complex samples)
+/// * `params` - CAF computation parameters
+///
+/// # Returns
+/// CAF surface with time-delay vs Doppler
+///
+/// # Panics
+/// Panics if signals have different lengths
+pub fn compute_caf<T>(signal1: &[Complex<T>], signal2: &[Complex<T>], params: &CafParams) -> CafSurface<T>
+where
+    T: Float + RemAssign + DivAssign + Send + Sync + FromPrimitive + Signed + Debug + 'static,
+{
+    assert_eq!(
+        signal1.len(),
+        signal2.len(),
+        "Signals must have the same length"
+    );
+
+    let n = signal1.len();
+    let n_time = (n + params.time_step - 1) / params.time_step; // Ceiling division
+
+    // Build Doppler shift array
+    let num_doppler = ((2.0 * params.max_doppler_hz) / params.freq_step_hz) as usize + 1;
+    let doppler_shifts: Vec<f64> = (0..num_doppler)
+        .map(|i| -params.max_doppler_hz + (i as f64) * params.freq_step_hz)
+        .collect();
+
+    // Pre-allocate surface (will be filled in parallel)
+    let surface: Arc<Mutex<Vec<Vec<T>>>> = Arc::new(Mutex::new(vec![vec![T::zero(); n_time]; num_doppler]));
+
+    // Parallel processing over Doppler shifts
+    doppler_shifts.par_iter().enumerate().for_each(|(doppler_idx, &doppler_hz)| {
+        let correlation = compute_correlation_at_doppler(signal1, signal2, doppler_hz, params.sample_rate_hz);
+
+        // Downsample by time_step for coarse mode
+        let downsampled: Vec<T> = correlation
+            .iter()
+            .step_by(params.time_step)
+            .map(|&c| c.norm())
+            .collect();
+
+        // Store in surface
+        let mut surf = surface.lock().unwrap();
+        surf[doppler_idx] = downsampled;
+    });
+
+    // Extract surface from Arc<Mutex<>>
+    let surface_data = Arc::try_unwrap(surface)
+        .expect("Failed to unwrap Arc")
+        .into_inner()
+        .expect("Failed to unwrap Mutex");
+
+    // Build time delay array
+    let time_delays: Vec<T> = (0..n_time)
+        .map(|i| T::from(i * params.time_step).unwrap())
+        .collect();
+
+    // Build Doppler shift array (as T)
+    let doppler_shifts_t: Vec<T> = doppler_shifts.iter().map(|&d| T::from(d).unwrap()).collect();
+
+    CafSurface {
+        surface: surface_data,
+        time_delays,
+        doppler_shifts: doppler_shifts_t,
+    }
+}
+
+/// Compute correlation at a specific Doppler shift
+///
+/// # Arguments
+/// * `signal1` - Reference signal
+/// * `signal2` - Target signal
+/// * `doppler_hz` - Doppler shift to apply (Hz)
+/// * `sample_rate_hz` - Sample rate (Hz)
+///
+/// # Returns
+/// Complex correlation in time domain
+fn compute_correlation_at_doppler<T>(
+    signal1: &[Complex<T>],
+    signal2: &[Complex<T>],
+    doppler_hz: f64,
+    sample_rate_hz: f64,
+) -> Vec<Complex<T>>
+where
+    T: Float + RemAssign + DivAssign + Send + Sync + FromPrimitive + Signed + Debug + 'static,
+{
+    // Apply frequency shift to signal1
+    let mut signal1_shifted: Vec<Complex<T>> = signal1.to_vec();
+    freq_shift_inplace(&mut signal1_shifted, doppler_hz, sample_rate_hz);
+
+    // FFT of shifted signal1
+    let mut s1_freq = signal1_shifted.clone();
+    fft(&mut s1_freq);
+
+    // FFT of signal2
+    let mut s2_freq = signal2.to_vec();
+    fft(&mut s2_freq);
+
+    // Multiply conjugate: S1* � S2
+    let mut correlation_freq: Vec<Complex<T>> = s1_freq
+        .iter()
+        .zip(s2_freq.iter())
+        .map(|(s1, s2)| s1.conj() * s2)
+        .collect();
+
+    // IFFT to get correlation in time domain
+    ifft(&mut correlation_freq);
+
+    correlation_freq
+}
+
+/// Apply frequency shift in-place
+///
+/// Multiplies signal by e^(j2�ft) for frequency offset f
+fn freq_shift_inplace<T>(signal: &mut [Complex<T>], freq_hz: f64, sample_rate_hz: f64)
+where
+    T: Float + FromPrimitive,
+{
+    let two_pi = T::from(2.0 * std::f64::consts::PI).unwrap();
+    let fs = T::from(sample_rate_hz).unwrap();
+    let f = T::from(freq_hz).unwrap();
+
+    for (i, sample) in signal.iter_mut().enumerate() {
+        let t = T::from(i).unwrap() / fs;
+        let phase = two_pi * f * t;
+        let phasor = Complex::new(phase.cos(), phase.sin());
+        *sample = *sample * phasor;
+    }
+}
+
+/// Find peak in CAF surface using 2D max search
+///
+/// # Arguments
+/// * `surface` - CAF surface from compute_caf()
+///
+/// # Returns
+/// Peak location with magnitude and coordinates
+pub fn find_peak<T>(surface: &CafSurface<T>) -> Peak
+where
+    T: Float + Debug,
+{
+    let mut max_magnitude = T::zero();
+    let mut max_doppler_idx = 0;
+    let mut max_delay_idx = 0;
+
+    for (doppler_idx, row) in surface.surface.iter().enumerate() {
+        for (delay_idx, &magnitude) in row.iter().enumerate() {
+            if magnitude > max_magnitude {
+                max_magnitude = magnitude;
+                max_doppler_idx = doppler_idx;
+                max_delay_idx = delay_idx;
+            }
+        }
+    }
+
+    Peak {
+        magnitude: max_magnitude.to_f64().unwrap(),
+        delay_idx: max_delay_idx,
+        doppler_idx: max_doppler_idx,
+        delay_samples: surface.time_delays[max_delay_idx].to_f64().unwrap(),
+        doppler_hz: surface.doppler_shifts[max_doppler_idx].to_f64().unwrap(),
+    }
+}
+
+/// Interpolate peak for sub-sample accuracy
+///
+/// # Arguments
+/// * `surface` - CAF surface
+/// * `coarse_peak` - Peak from find_peak()
+/// * `method` - Interpolation method to use
+///
+/// # Returns
+/// Refined peak with sub-sample precision
+pub fn interpolate_peak<T>(
+    surface: &CafSurface<T>,
+    coarse_peak: &Peak,
+    method: InterpolationMethod,
+) -> RefinedPeak
+where
+    T: Float + Debug,
+{
+    match method {
+        InterpolationMethod::Parabolic2D => interpolate_parabolic_2d(surface, coarse_peak),
+        InterpolationMethod::Sinc2D => interpolate_sinc_2d(surface, coarse_peak),
+        InterpolationMethod::None => RefinedPeak {
+            magnitude: coarse_peak.magnitude,
+            delay_samples: coarse_peak.delay_samples,
+            doppler_hz: coarse_peak.doppler_hz,
+        },
+    }
+}
+
+/// Parabolic 2D interpolation for sub-sample peak refinement
+///
+/// Fits a 2D parabola to the 3�3 neighborhood around the peak
+fn interpolate_parabolic_2d<T>(surface: &CafSurface<T>, peak: &Peak) -> RefinedPeak
+where
+    T: Float + Debug,
+{
+    let d_idx = peak.doppler_idx;
+    let t_idx = peak.delay_idx;
+
+    let n_doppler = surface.surface.len();
+    let n_time = surface.surface[0].len();
+
+    // Check if we have enough neighbors for interpolation
+    if d_idx == 0 || d_idx >= n_doppler - 1 || t_idx == 0 || t_idx >= n_time - 1 {
+        // Peak is on the edge, can't interpolate
+        return RefinedPeak {
+            magnitude: peak.magnitude,
+            delay_samples: peak.delay_samples,
+            doppler_hz: peak.doppler_hz,
+        };
+    }
+
+    // Extract 3x3 neighborhood (doppler, time)
+    let z00 = surface.surface[d_idx - 1][t_idx - 1].to_f64().unwrap();
+    let z01 = surface.surface[d_idx - 1][t_idx].to_f64().unwrap();
+    let z02 = surface.surface[d_idx - 1][t_idx + 1].to_f64().unwrap();
+    let z10 = surface.surface[d_idx][t_idx - 1].to_f64().unwrap();
+    let z11 = surface.surface[d_idx][t_idx].to_f64().unwrap(); // Center (peak)
+    let z12 = surface.surface[d_idx][t_idx + 1].to_f64().unwrap();
+    let z20 = surface.surface[d_idx + 1][t_idx - 1].to_f64().unwrap();
+    let z21 = surface.surface[d_idx + 1][t_idx].to_f64().unwrap();
+    let z22 = surface.surface[d_idx + 1][t_idx + 1].to_f64().unwrap();
+
+    // Fit parabola: z = a + bx + cy + dx� + ey� + fxy
+    // We only need the quadratic terms for peak location
+
+    // Estimate derivatives using finite differences
+    // First derivatives (should be ~0 at peak)
+    let dz_dt = (z12 - z10) / 2.0;
+    let dz_dd = (z21 - z01) / 2.0;
+
+    // Second derivatives
+    let d2z_dt2 = z10 - 2.0 * z11 + z12;
+    let d2z_dd2 = z01 - 2.0 * z11 + z21;
+    let d2z_dtdd = (z22 - z20 - z02 + z00) / 4.0;
+
+    // Solve for peak offset using derivatives
+    // [d2z_dt2   d2z_dtdd ] [�t]   = - [dz_dt]
+    // [d2z_dtdd  d2z_dd2  ] [�d]       [dz_dd]
+
+    let det = d2z_dt2 * d2z_dd2 - d2z_dtdd * d2z_dtdd;
+
+    if det.abs() < 1e-10 {
+        // Singular matrix, can't interpolate
+        return RefinedPeak {
+            magnitude: peak.magnitude,
+            delay_samples: peak.delay_samples,
+            doppler_hz: peak.doppler_hz,
+        };
+    }
+
+    let delta_t = -(d2z_dd2 * dz_dt - d2z_dtdd * dz_dd) / det;
+    let delta_d = -(d2z_dt2 * dz_dd - d2z_dtdd * dz_dt) / det;
+
+    // Clamp offsets to reasonable range [-1, 1]
+    let delta_t = delta_t.max(-1.0).min(1.0);
+    let delta_d = delta_d.max(-1.0).min(1.0);
+
+    // Calculate refined position
+    let time_step = if t_idx > 0 {
+        (surface.time_delays[t_idx] - surface.time_delays[t_idx - 1]).to_f64().unwrap()
+    } else {
+        surface.time_delays[1].to_f64().unwrap() - surface.time_delays[0].to_f64().unwrap()
+    };
+
+    let doppler_step = if d_idx > 0 {
+        (surface.doppler_shifts[d_idx] - surface.doppler_shifts[d_idx - 1])
+            .to_f64()
+            .unwrap()
+    } else {
+        (surface.doppler_shifts[1] - surface.doppler_shifts[0])
+            .to_f64()
+            .unwrap()
+    };
+
+    let refined_delay = peak.delay_samples + delta_t * time_step;
+    let refined_doppler = peak.doppler_hz + delta_d * doppler_step;
+
+    // Estimate refined magnitude using parabola
+    let refined_magnitude = z11 + dz_dt * delta_t + dz_dd * delta_d
+        + 0.5 * (d2z_dt2 * delta_t * delta_t + d2z_dd2 * delta_d * delta_d + 2.0 * d2z_dtdd * delta_t * delta_d);
+
+    RefinedPeak {
+        magnitude: refined_magnitude.max(peak.magnitude), // Don't go below coarse peak
+        delay_samples: refined_delay,
+        doppler_hz: refined_doppler,
+    }
+}
+
+/// Sinc 2D interpolation for sub-sample peak refinement
+///
+/// Uses zero-padding in frequency domain for higher resolution
+fn interpolate_sinc_2d<T>(surface: &CafSurface<T>, peak: &Peak) -> RefinedPeak
+where
+    T: Float + Debug,
+{
+    // Extract region around peak
+    let d_idx = peak.doppler_idx;
+    let t_idx = peak.delay_idx;
+
+    let n_doppler = surface.surface.len();
+    let n_time = surface.surface[0].len();
+
+    // Define interpolation window size
+    let window_size = 16.min(n_time / 2).min(n_doppler / 2);
+
+    // Extract window around peak
+    let d_start = d_idx.saturating_sub(window_size / 2);
+    let d_end = (d_idx + window_size / 2).min(n_doppler);
+    let t_start = t_idx.saturating_sub(window_size / 2);
+    let t_end = (t_idx + window_size / 2).min(n_time);
+
+    let d_size = d_end - d_start;
+    let t_size = t_end - t_start;
+
+    // Extract local surface
+    let mut local_surface: Vec<Vec<f64>> = vec![vec![0.0; t_size]; d_size];
+    for (i, d) in (d_start..d_end).enumerate() {
+        for (j, t) in (t_start..t_end).enumerate() {
+            local_surface[i][j] = surface.surface[d][t].to_f64().unwrap();
+        }
+    }
+
+    // Upsample using FFT (sinc interpolation)
+    let upsample_factor = 4;
+    let upsampled = upsample_2d(&local_surface, upsample_factor);
+
+    // Find peak in upsampled surface
+    let mut max_val = 0.0;
+    let mut max_i = 0;
+    let mut max_j = 0;
+
+    for (i, row) in upsampled.iter().enumerate() {
+        for (j, &val) in row.iter().enumerate() {
+            if val > max_val {
+                max_val = val;
+                max_i = i;
+                max_j = j;
+            }
+        }
+    }
+
+    // Map back to original coordinates
+    let local_d_offset = max_i as f64 / upsample_factor as f64;
+    let local_t_offset = max_j as f64 / upsample_factor as f64;
+
+    let time_step = if t_idx > 0 {
+        (surface.time_delays[t_idx] - surface.time_delays[t_idx - 1]).to_f64().unwrap()
+    } else {
+        surface.time_delays[1].to_f64().unwrap() - surface.time_delays[0].to_f64().unwrap()
+    };
+
+    let doppler_step = if d_idx > 0 {
+        (surface.doppler_shifts[d_idx] - surface.doppler_shifts[d_idx - 1])
+            .to_f64()
+            .unwrap()
+    } else {
+        (surface.doppler_shifts[1] - surface.doppler_shifts[0])
+            .to_f64()
+            .unwrap()
+    };
+
+    let refined_delay = surface.time_delays[t_start].to_f64().unwrap() + local_t_offset * time_step;
+    let refined_doppler =
+        surface.doppler_shifts[d_start].to_f64().unwrap() + local_d_offset * doppler_step;
+
+    RefinedPeak {
+        magnitude: max_val,
+        delay_samples: refined_delay,
+        doppler_hz: refined_doppler,
+    }
+}
+
+/// Upsample 2D surface using FFT (sinc interpolation)
+fn upsample_2d(surface: &[Vec<f64>], factor: usize) -> Vec<Vec<f64>> {
+    let n_doppler = surface.len();
+    let n_time = surface[0].len();
+
+    let new_n_doppler = n_doppler * factor;
+    let new_n_time = n_time * factor;
+
+    // For simplicity, upsample each dimension separately
+    // First upsample time dimension
+    let mut time_upsampled: Vec<Vec<f64>> = Vec::new();
+    for row in surface.iter() {
+        time_upsampled.push(upsample_1d(row, factor));
+    }
+
+    // Then upsample doppler dimension (transpose, upsample, transpose back)
+    let mut doppler_upsampled: Vec<Vec<f64>> = vec![vec![0.0; new_n_time]; new_n_doppler];
+
+    for t in 0..new_n_time {
+        let column: Vec<f64> = time_upsampled.iter().map(|row| row[t]).collect();
+        let upsampled_column = upsample_1d(&column, factor);
+        for (d, &val) in upsampled_column.iter().enumerate() {
+            doppler_upsampled[d][t] = val;
+        }
+    }
+
+    doppler_upsampled
+}
+
+/// Upsample 1D signal using FFT (sinc interpolation)
+fn upsample_1d(signal: &[f64], factor: usize) -> Vec<f64> {
+    let n = signal.len();
+    let new_n = n * factor;
+
+    // Convert to complex
+    let mut signal_complex: Vec<Complex<f64>> = signal.iter().map(|&x| Complex::new(x, 0.0)).collect();
+
+    // FFT
+    fft(&mut signal_complex);
+
+    // Zero-pad in frequency domain
+    let mut padded = vec![Complex::new(0.0, 0.0); new_n];
+
+    // Copy positive frequencies
+    let half = n / 2;
+    for i in 0..=half {
+        padded[i] = signal_complex[i];
+    }
+
+    // Copy negative frequencies
+    for i in 1..half {
+        padded[new_n - i] = signal_complex[n - i];
+    }
+
+    // IFFT
+    ifft(&mut padded);
+
+    // Extract real part and scale
+    padded.iter().map(|c| c.re * factor as f64).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::generate::AWGN;
+    use std::env;
+
+    /// Helper function to generate test signal with AWGN
+    fn generate_test_signal(length: usize, sample_rate: f64, seed: u64) -> Vec<Complex<f64>> {
+        let mut awgn = AWGN::new_from_seed(sample_rate, length, 1.0, seed);
+        awgn.generate_block::<f64>().to_vec()
+    }
+
+    /// Helper function to apply circular time shift
+    fn circular_shift<T: Clone>(signal: &[T], shift: isize) -> Vec<T> {
+        let n = signal.len();
+        let shift = ((shift % n as isize) + n as isize) as usize % n;
+
+        let mut shifted = vec![signal[0].clone(); n];
+        for i in 0..n {
+            shifted[i] = signal[(i + n - shift) % n].clone();
+        }
+        shifted
+    }
+
+    /// Helper function to apply frequency shift
+    fn apply_freq_shift(signal: &[Complex<f64>], freq_hz: f64, sample_rate_hz: f64) -> Vec<Complex<f64>> {
+        let mut shifted = signal.to_vec();
+        freq_shift_inplace(&mut shifted, freq_hz, sample_rate_hz);
+        shifted
+    }
+
+    #[test]
+    fn test_caf_autocorrelation() {
+        let plot = env::var("PLOT").unwrap_or_else(|_| "false".to_string());
+        let should_plot = plot.to_lowercase() == "true";
+
+        if !should_plot {
+            println!("Skipping test_caf_autocorrelation plot (set PLOT=true to enable)");
+            return;
+        }
+
+        let sample_rate = 1e6;
+        let length = 1024;
+
+        // Generate signal
+        let signal = generate_test_signal(length, sample_rate, 42);
+
+        // CAF parameters
+        let params = CafParams {
+            time_step: 1,
+            freq_step_hz: 50.0,
+            max_doppler_hz: 500.0,
+            sample_rate_hz: sample_rate,
+        };
+
+        // Compute CAF
+        let surface = compute_caf(&signal, &signal, &params);
+
+        // Find peak
+        let peak = find_peak(&surface);
+
+        println!("Autocorrelation peak:");
+        println!("  Delay: {} samples", peak.delay_samples);
+        println!("  Doppler: {} Hz", peak.doppler_hz);
+        println!("  Magnitude: {}", peak.magnitude);
+
+        // Peak should be near (0, 0)
+        assert!(peak.delay_samples.abs() < 2.0, "Expected delay near 0, got {}", peak.delay_samples);
+        assert!(peak.doppler_hz.abs() < 100.0, "Expected Doppler near 0, got {}", peak.doppler_hz);
+
+        // Plot
+        plot::plot_caf_surface_3d(&surface, Some(&peak), "CAF: Autocorrelation");
+        plot::plot_caf_heatmap(&surface, Some(&peak), "CAF Heatmap: Autocorrelation");
+        plot::plot_caf_slices(&surface, &peak, "CAF Slices: Autocorrelation");
+    }
+
+    #[test]
+    fn test_caf_time_delay() {
+        let plot = env::var("PLOT").unwrap_or_else(|_| "false".to_string());
+        let should_plot = plot.to_lowercase() == "true";
+
+        if !should_plot {
+            println!("Skipping test_caf_time_delay plot (set PLOT=true to enable)");
+            return;
+        }
+
+        let sample_rate = 1e6;
+        let length = 1024;
+        let time_delay = 50; // samples
+
+        // Generate common signal
+        let signal_common = generate_test_signal(length, sample_rate, 0);
+        let noise1 = generate_test_signal(length, sample_rate, 0);
+        let noise2 = generate_test_signal(length, sample_rate, 0);
+
+        // signal1 = common + noise1
+        let signal1: Vec<Complex<f64>> = signal_common
+            .iter()
+            .zip(noise1.iter())
+            .map(|(s, n)| s + n * 0.1)
+            .collect();
+
+        // signal2 = shifted(common) + noise2
+        let signal_common_shifted = circular_shift(&signal_common, time_delay as isize);
+        let signal2: Vec<Complex<f64>> = signal_common_shifted
+            .iter()
+            .zip(noise2.iter())
+            .map(|(s, n)| s + n * 0.1)
+            .collect();
+
+        // CAF parameters
+        let params = CafParams {
+            time_step: 1,
+            freq_step_hz: 50.0,
+            max_doppler_hz: 500.0,
+            sample_rate_hz: sample_rate,
+        };
+
+        // Compute CAF
+        let surface = compute_caf(&signal1, &signal2, &params);
+
+        // Find peak
+        let peak = find_peak(&surface);
+
+        println!("Time delay peak:");
+        println!("  Expected delay: {} samples", time_delay);
+        println!("  Found delay: {} samples", peak.delay_samples);
+        println!("  Doppler: {} Hz", peak.doppler_hz);
+        println!("  Magnitude: {}", peak.magnitude);
+
+        // Validate
+        assert!((peak.delay_samples - time_delay as f64).abs() < 2.0);
+        assert!(peak.doppler_hz.abs() < 100.0);
+
+        // Plot
+        plot::plot_caf_surface_3d(&surface, Some(&peak), "CAF: Time Delay");
+        plot::plot_caf_heatmap(&surface, Some(&peak), "CAF Heatmap: Time Delay");
+        plot::plot_caf_slices(&surface, &peak, "CAF Slices: Time Delay");
+    }
+
+    #[test]
+    fn test_caf_frequency_shift() {
+        let plot = env::var("PLOT").unwrap_or_else(|_| "false".to_string());
+        let should_plot = plot.to_lowercase() == "true";
+
+        if !should_plot {
+            println!("Skipping test_caf_frequency_shift plot (set PLOT=true to enable)");
+            return;
+        }
+
+        let sample_rate = 1e6;
+        let length = 1024;
+        let freq_shift_hz = 200.0;
+
+        // Generate common signal
+        let signal_common = generate_test_signal(length, sample_rate, 42);
+        let noise1 = generate_test_signal(length, sample_rate, 100);
+        let noise2 = generate_test_signal(length, sample_rate, 200);
+
+        // signal1 = common + noise1
+        let signal1: Vec<Complex<f64>> = signal_common
+            .iter()
+            .zip(noise1.iter())
+            .map(|(s, n)| s + n * 0.1)
+            .collect();
+
+        // signal2 = freq_shift(common) + noise2
+        let signal_common_shifted = apply_freq_shift(&signal_common, freq_shift_hz, sample_rate);
+        let signal2: Vec<Complex<f64>> = signal_common_shifted
+            .iter()
+            .zip(noise2.iter())
+            .map(|(s, n)| s + n * 0.1)
+            .collect();
+
+        // CAF parameters
+        let params = CafParams {
+            time_step: 1,
+            freq_step_hz: 25.0,
+            max_doppler_hz: 500.0,
+            sample_rate_hz: sample_rate,
+        };
+
+        // Compute CAF
+        let surface = compute_caf(&signal1, &signal2, &params);
+
+        // Find peak
+        let peak = find_peak(&surface);
+
+        println!("Frequency shift peak:");
+        println!("  Delay: {} samples", peak.delay_samples);
+        println!("  Expected Doppler: {} Hz", freq_shift_hz);
+        println!("  Found Doppler: {} Hz", peak.doppler_hz);
+        println!("  Magnitude: {}", peak.magnitude);
+
+        // Validate
+        assert!(peak.delay_samples.abs() < 2.0);
+        assert!((peak.doppler_hz - freq_shift_hz).abs() < 50.0);
+
+        // Plot
+        plot::plot_caf_surface_3d(&surface, Some(&peak), "CAF: Frequency Shift");
+        plot::plot_caf_heatmap(&surface, Some(&peak), "CAF Heatmap: Frequency Shift");
+        plot::plot_caf_slices(&surface, &peak, "CAF Slices: Frequency Shift");
+    }
+
+    #[test]
+    fn test_caf_tdoa_doppler_combined() {
+        let plot = env::var("PLOT").unwrap_or_else(|_| "false".to_string());
+        let should_plot = plot.to_lowercase() == "true";
+
+        if !should_plot {
+            println!("Skipping test_caf_tdoa_doppler_combined plot (set PLOT=true to enable)");
+            return;
+        }
+
+        let sample_rate = 1e6;
+        let length = 1024;
+        let time_delay = 40;
+        let freq_shift_hz = 150.0;
+
+        // Generate common signal
+        let signal_common = generate_test_signal(length, sample_rate, 42);
+        let noise1 = generate_test_signal(length, sample_rate, 100);
+        let noise2 = generate_test_signal(length, sample_rate, 200);
+
+        // signal1 = common + noise1
+        let signal1: Vec<Complex<f64>> = signal_common
+            .iter()
+            .zip(noise1.iter())
+            .map(|(s, n)| s + n * 0.1)
+            .collect();
+
+        // signal2 = freq_shift(time_shift(common)) + noise2
+        let signal_common_shifted = circular_shift(&signal_common, time_delay as isize);
+        let signal_common_shifted = apply_freq_shift(&signal_common_shifted, freq_shift_hz, sample_rate);
+        let signal2: Vec<Complex<f64>> = signal_common_shifted
+            .iter()
+            .zip(noise2.iter())
+            .map(|(s, n)| s + n * 0.1)
+            .collect();
+
+        // CAF parameters
+        let params = CafParams {
+            time_step: 1,
+            freq_step_hz: 25.0,
+            max_doppler_hz: 500.0,
+            sample_rate_hz: sample_rate,
+        };
+
+        // Compute CAF
+        let surface = compute_caf(&signal1, &signal2, &params);
+
+        // Find peak
+        let peak = find_peak(&surface);
+
+        println!("Combined TDOA+Doppler peak:");
+        println!("  Expected delay: {} samples", time_delay);
+        println!("  Found delay: {} samples", peak.delay_samples);
+        println!("  Expected Doppler: {} Hz", freq_shift_hz);
+        println!("  Found Doppler: {} Hz", peak.doppler_hz);
+        println!("  Magnitude: {}", peak.magnitude);
+
+        // Validate
+        assert!((peak.delay_samples - time_delay as f64).abs() < 2.0);
+        assert!((peak.doppler_hz - freq_shift_hz).abs() < 50.0);
+
+        // Plot
+        plot::plot_caf_surface_3d(&surface, Some(&peak), "CAF: TDOA + Doppler");
+        plot::plot_caf_heatmap(&surface, Some(&peak), "CAF Heatmap: TDOA + Doppler");
+        plot::plot_caf_slices(&surface, &peak, "CAF Slices: TDOA + Doppler");
+    }
+
+    #[test]
+    fn test_caf_interpolation() {
+        let plot = env::var("PLOT").unwrap_or_else(|_| "false".to_string());
+        let should_plot = plot.to_lowercase() == "true";
+
+        if !should_plot {
+            println!("Skipping test_caf_interpolation plot (set PLOT=true to enable)");
+            return;
+        }
+
+        let sample_rate = 1e6;
+        let length = 2048;
+        let time_delay = 37;
+        let freq_shift_hz = 123.0;
+
+        // Generate common signal
+        let signal_common = generate_test_signal(length, sample_rate, 42);
+
+        // Apply shifts
+        let signal1 = signal_common.clone();
+        let signal2_shifted = circular_shift(&signal_common, time_delay as isize);
+        let signal2 = apply_freq_shift(&signal2_shifted, freq_shift_hz, sample_rate);
+
+        // CAF parameters (coarser grid to test interpolation)
+        let params = CafParams {
+            time_step: 2, // Coarse mode
+            freq_step_hz: 50.0,
+            max_doppler_hz: 500.0,
+            sample_rate_hz: sample_rate,
+        };
+
+        // Compute CAF
+        let surface = compute_caf(&signal1, &signal2, &params);
+
+        // Find coarse peak
+        let coarse_peak = find_peak(&surface);
+
+        // Interpolate with both methods
+        let parabolic_peak = interpolate_peak(&surface, &coarse_peak, InterpolationMethod::Parabolic2D);
+        let sinc_peak = interpolate_peak(&surface, &coarse_peak, InterpolationMethod::Sinc2D);
+
+        println!("Interpolation comparison:");
+        println!("  Expected: delay={} samples, Doppler={} Hz", time_delay, freq_shift_hz);
+        println!("  Coarse:      delay={:.2} samples, Doppler={:.2} Hz", coarse_peak.delay_samples, coarse_peak.doppler_hz);
+        println!("  Parabolic:   delay={:.2} samples, Doppler={:.2} Hz", parabolic_peak.delay_samples, parabolic_peak.doppler_hz);
+        println!("  Sinc:        delay={:.2} samples, Doppler={:.2} Hz", sinc_peak.delay_samples, sinc_peak.doppler_hz);
+
+        // Both methods should improve accuracy
+        let coarse_delay_error = (coarse_peak.delay_samples - time_delay as f64).abs();
+        let parabolic_delay_error = (parabolic_peak.delay_samples - time_delay as f64).abs();
+        let sinc_delay_error = (sinc_peak.delay_samples - time_delay as f64).abs();
+
+        println!("  Delay errors: coarse={:.2}, parabolic={:.2}, sinc={:.2}",
+                 coarse_delay_error, parabolic_delay_error, sinc_delay_error);
+
+        // Plot
+        plot::plot_caf_surface_3d(&surface, Some(&coarse_peak), "CAF: Interpolation Test");
+        plot::plot_caf_heatmap(&surface, Some(&coarse_peak), "CAF Heatmap: Interpolation Test");
+        plot::plot_caf_slices(&surface, &coarse_peak, "CAF Slices: Interpolation Test");
+    }
+}
+
+#[cfg(test)]
+mod plot {
+    use super::*;
+    use plotly::common::{ColorScale, ColorScalePalette, Mode};
+    use plotly::layout::{Axis, Layout};
+    use plotly::{HeatMap, Plot, Scatter, Surface};
+
+    /// Plot 3D surface of CAF magnitude
+    pub fn plot_caf_surface_3d(surface: &CafSurface<f64>, _peak: Option<&Peak>, title: &str) {
+        let mut plot = Plot::new();
+
+        // Convert to dB for better visualization
+        let surface_db: Vec<Vec<f64>> = surface
+            .surface
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|&val| {
+                        if val > 0.0 {
+                            10.0 * val.log10()
+                        } else {
+                            -100.0
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+
+        let trace = Surface::new(surface_db)
+            .x(surface.time_delays.iter().map(|&x| x).collect())
+            .y(surface.doppler_shifts.iter().map(|&y| y).collect())
+            .color_scale(ColorScale::Palette(ColorScalePalette::Viridis));
+
+        plot.add_trace(trace);
+
+        let layout = Layout::new().title(title);
+
+        plot.set_layout(layout);
+        plot.show();
+    }
+
+    /// Plot 2D heatmap with optional peak marker
+    pub fn plot_caf_heatmap(surface: &CafSurface<f64>, peak: Option<&Peak>, title: &str) {
+        let mut plot = Plot::new();
+
+        // Convert to dB
+        let surface_db: Vec<Vec<f64>> = surface
+            .surface
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|&val| {
+                        if val > 0.0 {
+                            10.0 * val.log10()
+                        } else {
+                            -100.0
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+
+        let trace = HeatMap::new(
+            surface.time_delays.iter().map(|&x| x).collect(),
+            surface.doppler_shifts.iter().map(|&y| y).collect(),
+            surface_db,
+        )
+        .color_scale(ColorScale::Palette(ColorScalePalette::Viridis));
+
+        plot.add_trace(trace);
+
+        // Add peak marker if provided
+        if let Some(pk) = peak {
+            let marker_trace = Scatter::new(vec![pk.delay_samples], vec![pk.doppler_hz])
+                .mode(Mode::Markers)
+                .name("Peak");
+            plot.add_trace(marker_trace);
+        }
+
+        let layout = Layout::new()
+            .title(title)
+            .x_axis(Axis::new().title("Time Delay (samples)"))
+            .y_axis(Axis::new().title("Doppler Shift (Hz)"));
+
+        plot.set_layout(layout);
+        plot.show();
+    }
+
+    /// Plot 1D slices through peak
+    pub fn plot_caf_slices(surface: &CafSurface<f64>, peak: &Peak, title: &str) {
+        use plotly::layout::{GridPattern, LayoutGrid, RowOrder};
+
+        let mut plot = Plot::new();
+
+        // Time slice at peak Doppler
+        let time_slice: Vec<f64> = surface.surface[peak.doppler_idx]
+            .iter()
+            .map(|&val| if val > 0.0 { 10.0 * val.log10() } else { -100.0 })
+            .collect();
+
+        let time_trace = Scatter::new(
+            surface.time_delays.iter().map(|&x| x).collect(),
+            time_slice,
+        )
+        .mode(Mode::Lines)
+        .name("Time Slice")
+        .x_axis("x1")
+        .y_axis("y1");
+
+        // Doppler slice at peak time
+        let doppler_slice: Vec<f64> = surface
+            .surface
+            .iter()
+            .map(|row| {
+                let val = row[peak.delay_idx];
+                if val > 0.0 {
+                    10.0 * val.log10()
+                } else {
+                    -100.0
+                }
+            })
+            .collect();
+
+        let doppler_trace = Scatter::new(
+            surface.doppler_shifts.iter().map(|&y| y).collect(),
+            doppler_slice,
+        )
+        .mode(Mode::Lines)
+        .name("Doppler Slice")
+        .x_axis("x2")
+        .y_axis("y2");
+
+        plot.add_trace(time_trace);
+        plot.add_trace(doppler_trace);
+
+        let layout = Layout::new()
+            .title(title)
+            .grid(
+                LayoutGrid::new()
+                    .rows(2)
+                    .columns(1)
+                    .pattern(GridPattern::Independent)
+                    .row_order(RowOrder::TopToBottom),
+            )
+            .x_axis(Axis::new().title("Time Delay (samples)").domain(&[0.0, 1.0]))
+            .y_axis(
+                Axis::new()
+                    .title("CAF Magnitude (dB)")
+                    .domain(&[0.55, 1.0]),
+            )
+            .x_axis2(Axis::new().title("Doppler Shift (Hz)").domain(&[0.0, 1.0]))
+            .y_axis2(
+                Axis::new()
+                    .title("CAF Magnitude (dB)")
+                    .domain(&[0.0, 0.45]),
+            );
+
+        plot.set_layout(layout);
+        plot.show();
+    }
+}
