@@ -12,6 +12,43 @@ use std::sync::{Arc, Mutex};
 
 use crate::fft::{fft, ifft};
 
+/// Errors that can occur during CAF computation
+#[derive(Debug, Clone)]
+pub enum CafError {
+    /// Doppler range is invalid (min >= max)
+    InvalidDopplerRange { min: f64, max: f64 },
+    /// Delay range is invalid (min >= max)
+    InvalidDelayRange { min: f64, max: f64 },
+    /// Input signals have different lengths
+    SignalLengthMismatch {
+        signal1_len: usize,
+        signal2_len: usize,
+    },
+}
+
+impl std::fmt::Display for CafError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            CafError::InvalidDopplerRange { min, max } => {
+                write!(f, "Invalid Doppler range: min ({}) >= max ({})", min, max)
+            }
+            CafError::InvalidDelayRange { min, max } => {
+                write!(f, "Invalid delay range: min ({}) >= max ({})", min, max)
+            }
+            CafError::SignalLengthMismatch {
+                signal1_len,
+                signal2_len,
+            } => write!(
+                f,
+                "Signal length mismatch: {} != {}",
+                signal1_len, signal2_len
+            ),
+        }
+    }
+}
+
+impl std::error::Error for CafError {}
+
 /// Interpolation method for peak refinement
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum InterpolationMethod {
@@ -30,8 +67,11 @@ pub struct CafParams {
     pub time_step: usize,
     /// Frequency resolution for Doppler search (Hz)
     pub freq_step_hz: f64,
-    /// Maximum Doppler shift to search (+/- Hz)
-    pub max_doppler_hz: f64,
+    /// Doppler search range in Hz (min, max)
+    pub doppler_range_hz: (f64, f64),
+    /// Time delay search range in samples (min, max)
+    /// Can include negative values for searching backward time shifts
+    pub delay_range_samples: (f64, f64),
     /// Sample rate of signals (Hz)
     pub sample_rate_hz: f64,
 }
@@ -88,47 +128,94 @@ pub struct RefinedPeak {
 /// * `params` - CAF computation parameters
 ///
 /// # Returns
-/// CAF surface with time-delay vs Doppler
+/// CAF surface with time-delay vs Doppler, or error if parameters are invalid
 ///
-/// # Panics
-/// Panics if signals have different lengths
-pub fn compute_caf<T>(signal1: &[Complex<T>], signal2: &[Complex<T>], params: &CafParams) -> CafSurface<T>
+/// # Errors
+/// Returns `CafError` if:
+/// - Signal lengths don't match
+/// - Doppler range is invalid (min >= max)
+/// - Delay range is invalid (min >= max)
+pub fn compute_caf<T>(
+    signal1: &[Complex<T>],
+    signal2: &[Complex<T>],
+    params: &CafParams,
+) -> Result<CafSurface<T>, CafError>
 where
     T: Float + RemAssign + DivAssign + Send + Sync + FromPrimitive + Signed + Debug + 'static,
 {
-    assert_eq!(
-        signal1.len(),
-        signal2.len(),
-        "Signals must have the same length"
-    );
+    // Validate signal lengths
+    if signal1.len() != signal2.len() {
+        return Err(CafError::SignalLengthMismatch {
+            signal1_len: signal1.len(),
+            signal2_len: signal2.len(),
+        });
+    }
+
+    // Validate Doppler range
+    if params.doppler_range_hz.0 >= params.doppler_range_hz.1 {
+        return Err(CafError::InvalidDopplerRange {
+            min: params.doppler_range_hz.0,
+            max: params.doppler_range_hz.1,
+        });
+    }
+
+    // Validate delay range
+    if params.delay_range_samples.0 >= params.delay_range_samples.1 {
+        return Err(CafError::InvalidDelayRange {
+            min: params.delay_range_samples.0,
+            max: params.delay_range_samples.1,
+        });
+    }
 
     let n = signal1.len();
-    let n_time = (n + params.time_step - 1) / params.time_step; // Ceiling division
 
-    // Build Doppler shift array
-    let num_doppler = ((2.0 * params.max_doppler_hz) / params.freq_step_hz) as usize + 1;
+    // Build Doppler shift array from configurable range
+    let num_doppler = ((params.doppler_range_hz.1 - params.doppler_range_hz.0)
+        / params.freq_step_hz) as usize
+        + 1;
     let doppler_shifts: Vec<f64> = (0..num_doppler)
-        .map(|i| -params.max_doppler_hz + (i as f64) * params.freq_step_hz)
+        .map(|i| params.doppler_range_hz.0 + (i as f64) * params.freq_step_hz)
+        .collect();
+
+    // Build time delay array from configurable range (supports negative delays)
+    let min_delay = params.delay_range_samples.0;
+    let max_delay = params.delay_range_samples.1;
+    let n_time =
+        ((max_delay - min_delay) / params.time_step as f64).ceil() as usize + 1;
+
+    let time_delays: Vec<T> = (0..n_time)
+        .map(|i| T::from(min_delay + (i * params.time_step) as f64).unwrap())
         .collect();
 
     // Pre-allocate surface (will be filled in parallel)
     let surface: Arc<Mutex<Vec<Vec<T>>>> = Arc::new(Mutex::new(vec![vec![T::zero(); n_time]; num_doppler]));
 
     // Parallel processing over Doppler shifts
-    doppler_shifts.par_iter().enumerate().for_each(|(doppler_idx, &doppler_hz)| {
-        let correlation = compute_correlation_at_doppler(signal1, signal2, doppler_hz, params.sample_rate_hz);
+    doppler_shifts
+        .par_iter()
+        .enumerate()
+        .for_each(|(doppler_idx, &doppler_hz)| {
+            let correlation =
+                compute_correlation_at_doppler(signal1, signal2, doppler_hz, params.sample_rate_hz);
 
-        // Downsample by time_step for coarse mode
-        let downsampled: Vec<T> = correlation
-            .iter()
-            .step_by(params.time_step)
-            .map(|&c| c.norm())
-            .collect();
+            // Extract delay range from correlation and downsample by time_step
+            let downsampled: Vec<T> = (0..n_time)
+                .filter_map(|i| {
+                    let delay_samples = min_delay + (i * params.time_step) as f64;
+                    // Handle circular indexing for correlation
+                    let mut idx = delay_samples.round() as isize;
+                    if idx < 0 {
+                        idx = (n as isize + idx) % n as isize;
+                    }
+                    let idx = (idx as usize) % n;
+                    Some(correlation[idx].norm())
+                })
+                .collect();
 
-        // Store in surface
-        let mut surf = surface.lock().unwrap();
-        surf[doppler_idx] = downsampled;
-    });
+            // Store in surface
+            let mut surf = surface.lock().unwrap();
+            surf[doppler_idx] = downsampled;
+        });
 
     // Extract surface from Arc<Mutex<>>
     let surface_data = Arc::try_unwrap(surface)
@@ -136,19 +223,17 @@ where
         .into_inner()
         .expect("Failed to unwrap Mutex");
 
-    // Build time delay array
-    let time_delays: Vec<T> = (0..n_time)
-        .map(|i| T::from(i * params.time_step).unwrap())
+    // Build Doppler shift array (as T)
+    let doppler_shifts_t: Vec<T> = doppler_shifts
+        .iter()
+        .map(|&d| T::from(d).unwrap())
         .collect();
 
-    // Build Doppler shift array (as T)
-    let doppler_shifts_t: Vec<T> = doppler_shifts.iter().map(|&d| T::from(d).unwrap()).collect();
-
-    CafSurface {
+    Ok(CafSurface {
         surface: surface_data,
         time_delays,
         doppler_shifts: doppler_shifts_t,
-    }
+    })
 }
 
 /// Compute correlation at a specific Doppler shift
@@ -525,15 +610,21 @@ fn upsample_1d(signal: &[f64], factor: usize) -> Vec<f64> {
 mod tests {
     use super::*;
     use crate::generate::AWGN;
+    use crate::ComplexVec;
     use std::env;
 
     /// Helper function to generate test signal with AWGN
-    fn generate_test_signal(length: usize, sample_rate: f64, seed: u64) -> Vec<Complex<f64>> {
+    fn generate_test_signal(length: usize, sample_rate: f64, seed: u64) -> ComplexVec<f64> {
         let mut awgn = AWGN::new_from_seed(sample_rate, length, 1.0, seed);
-        awgn.generate_block::<f64>().to_vec()
+        awgn.generate_block::<f64>()
     }
 
     /// Helper function to apply circular time shift
+    ///
+    /// Shifts signal by `shift` samples. Positive shift moves the signal earlier in time
+    /// (signal appears to arrive sooner), which simulates negative TDOA.
+    ///
+    /// Example: shift=50 means output[0] = input[50], so the signal starts 50 samples earlier.
     fn circular_shift<T: Clone>(signal: &[T], shift: isize) -> Vec<T> {
         let n = signal.len();
         let shift = ((shift % n as isize) + n as isize) as usize % n;
@@ -542,13 +633,6 @@ mod tests {
         for i in 0..n {
             shifted[i] = signal[(i + n - shift) % n].clone();
         }
-        shifted
-    }
-
-    /// Helper function to apply frequency shift
-    fn apply_freq_shift(signal: &[Complex<f64>], freq_hz: f64, sample_rate_hz: f64) -> Vec<Complex<f64>> {
-        let mut shifted = signal.to_vec();
-        freq_shift_inplace(&mut shifted, freq_hz, sample_rate_hz);
         shifted
     }
 
@@ -572,12 +656,13 @@ mod tests {
         let params = CafParams {
             time_step: 1,
             freq_step_hz: 50.0,
-            max_doppler_hz: 500.0,
+            doppler_range_hz: (-500.0, 500.0),
+            delay_range_samples: (-50.0, 50.0),
             sample_rate_hz: sample_rate,
         };
 
         // Compute CAF
-        let surface = compute_caf(&signal, &signal, &params);
+        let surface = compute_caf(&signal, &signal, &params).unwrap();
 
         // Find peak
         let peak = find_peak(&surface);
@@ -602,45 +687,33 @@ mod tests {
         let plot = env::var("PLOT").unwrap_or_else(|_| "false".to_string());
         let should_plot = plot.to_lowercase() == "true";
 
-        if !should_plot {
-            println!("Skipping test_caf_time_delay plot (set PLOT=true to enable)");
-            return;
-        }
-
         let sample_rate = 1e6;
         let length = 1024;
         let time_delay = 50; // samples
 
         // Generate common signal
         let signal_common = generate_test_signal(length, sample_rate, 0);
-        let noise1 = generate_test_signal(length, sample_rate, 0);
-        let noise2 = generate_test_signal(length, sample_rate, 0);
+        let noise1 = generate_test_signal(length, sample_rate, 1);
+        let noise2 = generate_test_signal(length, sample_rate, 2);
 
-        // signal1 = common + noise1
-        let signal1: Vec<Complex<f64>> = signal_common
-            .iter()
-            .zip(noise1.iter())
-            .map(|(s, n)| s + n * 0.1)
-            .collect();
+        // signal1 = common + noise1 * 0.1
+        let signal1 = &signal_common + &(&noise1 * 0.1);
 
-        // signal2 = shifted(common) + noise2
-        let signal_common_shifted = circular_shift(&signal_common, time_delay as isize);
-        let signal2: Vec<Complex<f64>> = signal_common_shifted
-            .iter()
-            .zip(noise2.iter())
-            .map(|(s, n)| s + n * 0.1)
-            .collect();
+        // signal2 = shifted(common) + noise2 * 0.1
+        let signal_common_shifted = ComplexVec::from_vec(circular_shift(&signal_common, time_delay as isize));
+        let signal2 = &signal_common_shifted + &(&noise2 * 0.1);
 
         // CAF parameters
         let params = CafParams {
             time_step: 1,
             freq_step_hz: 50.0,
-            max_doppler_hz: 500.0,
+            doppler_range_hz: (-500.0, 500.0),
+            delay_range_samples: (0.0, 100.0),
             sample_rate_hz: sample_rate,
         };
 
         // Compute CAF
-        let surface = compute_caf(&signal1, &signal2, &params);
+        let surface = compute_caf(&signal1, &signal2, &params).unwrap();
 
         // Find peak
         let peak = find_peak(&surface);
@@ -652,13 +725,16 @@ mod tests {
         println!("  Magnitude: {}", peak.magnitude);
 
         // Validate
-        assert!((peak.delay_samples - time_delay as f64).abs() < 2.0);
+        assert!((peak.delay_samples - time_delay as f64).abs() < 1.0);
         assert!(peak.doppler_hz.abs() < 100.0);
 
         // Plot
-        plot::plot_caf_surface_3d(&surface, Some(&peak), "CAF: Time Delay");
-        plot::plot_caf_heatmap(&surface, Some(&peak), "CAF Heatmap: Time Delay");
-        plot::plot_caf_slices(&surface, &peak, "CAF Slices: Time Delay");
+        if should_plot {
+            plot::plot_caf_surface_3d(&surface, Some(&peak), "CAF: Time Delay");
+            plot::plot_caf_heatmap(&surface, Some(&peak), "CAF Heatmap: Time Delay");
+            plot::plot_caf_slices(&surface, &peak, "CAF Slices: Time Delay");
+        }
+
     }
 
     #[test]
@@ -673,38 +749,32 @@ mod tests {
 
         let sample_rate = 1e6;
         let length = 1024;
-        let freq_shift_hz = 200.0;
+        let freq_shift_hz = 100.0;
 
         // Generate common signal
         let signal_common = generate_test_signal(length, sample_rate, 42);
         let noise1 = generate_test_signal(length, sample_rate, 100);
         let noise2 = generate_test_signal(length, sample_rate, 200);
 
-        // signal1 = common + noise1
-        let signal1: Vec<Complex<f64>> = signal_common
-            .iter()
-            .zip(noise1.iter())
-            .map(|(s, n)| s + n * 0.1)
-            .collect();
+        // signal1 = common + noise1 * 0.1
+        let signal1 = &signal_common + &(&noise1 * 0.1);
 
-        // signal2 = freq_shift(common) + noise2
-        let signal_common_shifted = apply_freq_shift(&signal_common, freq_shift_hz, sample_rate);
-        let signal2: Vec<Complex<f64>> = signal_common_shifted
-            .iter()
-            .zip(noise2.iter())
-            .map(|(s, n)| s + n * 0.1)
-            .collect();
+        // signal2 = freq_shift(common) + noise2 * 0.1
+        let mut signal_common_shifted = signal_common.clone();
+        signal_common_shifted.freq_shift(freq_shift_hz, sample_rate);
+        let signal2 = &signal_common_shifted + &(&noise2 * 0.1);
 
         // CAF parameters
         let params = CafParams {
             time_step: 1,
-            freq_step_hz: 25.0,
-            max_doppler_hz: 500.0,
+            freq_step_hz: 10.0,
+            doppler_range_hz: (-250.0, 250.0),
+            delay_range_samples: (-10.0, 10.0),
             sample_rate_hz: sample_rate,
         };
 
         // Compute CAF
-        let surface = compute_caf(&signal1, &signal2, &params);
+        let surface = compute_caf(&signal1, &signal2, &params).unwrap();
 
         // Find peak
         let peak = find_peak(&surface);
@@ -745,32 +815,25 @@ mod tests {
         let noise1 = generate_test_signal(length, sample_rate, 100);
         let noise2 = generate_test_signal(length, sample_rate, 200);
 
-        // signal1 = common + noise1
-        let signal1: Vec<Complex<f64>> = signal_common
-            .iter()
-            .zip(noise1.iter())
-            .map(|(s, n)| s + n * 0.1)
-            .collect();
+        // signal1 = common + noise1 * 0.1
+        let signal1 = &signal_common + &(&noise1 * 0.1);
 
-        // signal2 = freq_shift(time_shift(common)) + noise2
-        let signal_common_shifted = circular_shift(&signal_common, time_delay as isize);
-        let signal_common_shifted = apply_freq_shift(&signal_common_shifted, freq_shift_hz, sample_rate);
-        let signal2: Vec<Complex<f64>> = signal_common_shifted
-            .iter()
-            .zip(noise2.iter())
-            .map(|(s, n)| s + n * 0.1)
-            .collect();
+        // signal2 = freq_shift(time_shift(common)) + noise2 * 0.1
+        let mut signal_common_shifted = ComplexVec::from_vec(circular_shift(&signal_common, time_delay as isize));
+        signal_common_shifted.freq_shift(freq_shift_hz, sample_rate);
+        let signal2 = &signal_common_shifted + &(&noise2 * 0.1);
 
         // CAF parameters
         let params = CafParams {
             time_step: 1,
             freq_step_hz: 25.0,
-            max_doppler_hz: 500.0,
+            doppler_range_hz: (-500.0, 500.0),
+            delay_range_samples: (0.0, 100.0),
             sample_rate_hz: sample_rate,
         };
 
         // Compute CAF
-        let surface = compute_caf(&signal1, &signal2, &params);
+        let surface = compute_caf(&signal1, &signal2, &params).unwrap();
 
         // Find peak
         let peak = find_peak(&surface);
@@ -812,19 +875,20 @@ mod tests {
 
         // Apply shifts
         let signal1 = signal_common.clone();
-        let signal2_shifted = circular_shift(&signal_common, time_delay as isize);
-        let signal2 = apply_freq_shift(&signal2_shifted, freq_shift_hz, sample_rate);
+        let mut signal2 = ComplexVec::from_vec(circular_shift(&signal_common, time_delay as isize));
+        signal2.freq_shift(freq_shift_hz, sample_rate);
 
         // CAF parameters (coarser grid to test interpolation)
         let params = CafParams {
             time_step: 2, // Coarse mode
             freq_step_hz: 50.0,
-            max_doppler_hz: 500.0,
+            doppler_range_hz: (-500.0, 500.0),
+            delay_range_samples: (0.0, 100.0),
             sample_rate_hz: sample_rate,
         };
 
         // Compute CAF
-        let surface = compute_caf(&signal1, &signal2, &params);
+        let surface = compute_caf(&signal1, &signal2, &params).unwrap();
 
         // Find coarse peak
         let coarse_peak = find_peak(&surface);
@@ -851,6 +915,88 @@ mod tests {
         plot::plot_caf_surface_3d(&surface, Some(&coarse_peak), "CAF: Interpolation Test");
         plot::plot_caf_heatmap(&surface, Some(&coarse_peak), "CAF Heatmap: Interpolation Test");
         plot::plot_caf_slices(&surface, &coarse_peak, "CAF Slices: Interpolation Test");
+    }
+
+    #[test]
+    fn test_caf_invalid_doppler_range() {
+        let sample_rate = 1e6;
+        let length = 1024;
+
+        let signal1 = generate_test_signal(length, sample_rate, 42);
+        let signal2 = generate_test_signal(length, sample_rate, 43);
+
+        // Invalid Doppler range (min >= max)
+        let params = CafParams {
+            time_step: 1,
+            freq_step_hz: 50.0,
+            doppler_range_hz: (500.0, -500.0), // min > max
+            delay_range_samples: (0.0, 100.0),
+            sample_rate_hz: sample_rate,
+        };
+
+        let result = compute_caf(&signal1, &signal2, &params);
+        assert!(result.is_err());
+
+        if let Err(CafError::InvalidDopplerRange { min, max }) = result {
+            assert_eq!(min, 500.0);
+            assert_eq!(max, -500.0);
+        } else {
+            panic!("Expected InvalidDopplerRange error");
+        }
+    }
+
+    #[test]
+    fn test_caf_invalid_delay_range() {
+        let sample_rate = 1e6;
+        let length = 1024;
+
+        let signal1 = generate_test_signal(length, sample_rate, 42);
+        let signal2 = generate_test_signal(length, sample_rate, 43);
+
+        // Invalid delay range (min >= max)
+        let params = CafParams {
+            time_step: 1,
+            freq_step_hz: 50.0,
+            doppler_range_hz: (-500.0, 500.0),
+            delay_range_samples: (100.0, 0.0), // min > max
+            sample_rate_hz: sample_rate,
+        };
+
+        let result = compute_caf(&signal1, &signal2, &params);
+        assert!(result.is_err());
+
+        if let Err(CafError::InvalidDelayRange { min, max }) = result {
+            assert_eq!(min, 100.0);
+            assert_eq!(max, 0.0);
+        } else {
+            panic!("Expected InvalidDelayRange error");
+        }
+    }
+
+    #[test]
+    fn test_caf_signal_length_mismatch() {
+        let sample_rate = 1e6;
+
+        let signal1 = generate_test_signal(1024, sample_rate, 42);
+        let signal2 = generate_test_signal(2048, sample_rate, 43); // Different length
+
+        let params = CafParams {
+            time_step: 1,
+            freq_step_hz: 50.0,
+            doppler_range_hz: (-500.0, 500.0),
+            delay_range_samples: (0.0, 100.0),
+            sample_rate_hz: sample_rate,
+        };
+
+        let result = compute_caf(&signal1, &signal2, &params);
+        assert!(result.is_err());
+
+        if let Err(CafError::SignalLengthMismatch { signal1_len, signal2_len }) = result {
+            assert_eq!(signal1_len, 1024);
+            assert_eq!(signal2_len, 2048);
+        } else {
+            panic!("Expected SignalLengthMismatch error");
+        }
     }
 }
 

@@ -21,8 +21,8 @@ pub use mod_type::ModType;
 
 // Re-export commonly used items from submodules
 pub use caf::{
-    compute_caf, find_peak, interpolate_peak, CafParams, CafSurface, InterpolationMethod, Peak,
-    RefinedPeak,
+    compute_caf, find_peak, interpolate_peak, CafError, CafParams, CafSurface,
+    InterpolationMethod, Peak, RefinedPeak,
 };
 pub use generate::{Carrier, Channel};
 
