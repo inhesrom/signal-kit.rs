@@ -100,6 +100,10 @@ pub struct Peak {
     pub delay_samples: f64,
     /// Doppler shift (Hz)
     pub doppler_hz: f64,
+    /// SNR in dB (peak relative to noise floor)
+    pub snr_db: f64,
+    /// Estimated noise floor (linear magnitude)
+    pub noise_floor: f64,
 }
 
 /// Refined peak with sub-sample accuracy
@@ -111,6 +115,10 @@ pub struct RefinedPeak {
     pub delay_samples: f64,
     /// Doppler shift with sub-bin precision (Hz)
     pub doppler_hz: f64,
+    /// SNR in dB (peak relative to noise floor)
+    pub snr_db: f64,
+    /// Estimated noise floor (linear magnitude)
+    pub noise_floor: f64,
 }
 
 /// Compute Cross Ambiguity Function using FFT-based algorithm
@@ -299,6 +307,38 @@ where
     }
 }
 
+/// Estimate noise floor from CAF surface using median
+///
+/// The median provides a robust estimate of the noise floor that is not
+/// affected by the peak or strong sidelobes. This allows computing SNR
+/// as the peak magnitude relative to the noise floor.
+///
+/// # Arguments
+/// * `surface` - CAF surface from compute_caf()
+///
+/// # Returns
+/// Median magnitude value (linear, not dB)
+pub fn estimate_noise_floor<T>(surface: &CafSurface<T>) -> T
+where
+    T: Float + Debug,
+{
+    let mut all_values: Vec<T> = surface
+        .surface
+        .iter()
+        .flat_map(|row| row.iter().copied())
+        .filter(|&val| val > T::zero()) // Only positive values
+        .collect();
+
+    if all_values.is_empty() {
+        return T::from(1e-10).unwrap(); // Fallback for empty surface
+    }
+
+    // Sort to find median
+    all_values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let median_idx = all_values.len() / 2;
+    all_values[median_idx]
+}
+
 /// Find peak in CAF surface using 2D max search
 ///
 /// # Arguments
@@ -310,6 +350,9 @@ pub fn find_peak<T>(surface: &CafSurface<T>) -> Peak
 where
     T: Float + Debug,
 {
+    // Estimate noise floor using median
+    let noise_floor = estimate_noise_floor(surface);
+
     let mut max_magnitude = T::zero();
     let mut max_doppler_idx = 0;
     let mut max_delay_idx = 0;
@@ -324,12 +367,19 @@ where
         }
     }
 
+    // Calculate SNR in dB
+    let magnitude_f64 = max_magnitude.to_f64().unwrap();
+    let noise_floor_f64 = noise_floor.to_f64().unwrap();
+    let snr_db = 10.0 * (magnitude_f64 / noise_floor_f64).log10();
+
     Peak {
-        magnitude: max_magnitude.to_f64().unwrap(),
+        magnitude: magnitude_f64,
         delay_idx: max_delay_idx,
         doppler_idx: max_doppler_idx,
         delay_samples: surface.time_delays[max_delay_idx].to_f64().unwrap(),
         doppler_hz: surface.doppler_shifts[max_doppler_idx].to_f64().unwrap(),
+        snr_db,
+        noise_floor: noise_floor_f64,
     }
 }
 
@@ -357,6 +407,8 @@ where
             magnitude: coarse_peak.magnitude,
             delay_samples: coarse_peak.delay_samples,
             doppler_hz: coarse_peak.doppler_hz,
+            snr_db: coarse_peak.snr_db,
+            noise_floor: coarse_peak.noise_floor,
         },
     }
 }
@@ -381,6 +433,8 @@ where
             magnitude: peak.magnitude,
             delay_samples: peak.delay_samples,
             doppler_hz: peak.doppler_hz,
+            snr_db: peak.snr_db,
+            noise_floor: peak.noise_floor,
         };
     }
 
@@ -420,6 +474,8 @@ where
             magnitude: peak.magnitude,
             delay_samples: peak.delay_samples,
             doppler_hz: peak.doppler_hz,
+            snr_db: peak.snr_db,
+            noise_floor: peak.noise_floor,
         };
     }
 
@@ -454,10 +510,17 @@ where
     let refined_magnitude = z11 + dz_dt * delta_t + dz_dd * delta_d
         + 0.5 * (d2z_dt2 * delta_t * delta_t + d2z_dd2 * delta_d * delta_d + 2.0 * d2z_dtdd * delta_t * delta_d);
 
+    let final_magnitude = refined_magnitude.max(peak.magnitude); // Don't go below coarse peak
+
+    // Recalculate SNR with refined magnitude
+    let refined_snr_db = 10.0 * (final_magnitude / peak.noise_floor).log10();
+
     RefinedPeak {
-        magnitude: refined_magnitude.max(peak.magnitude), // Don't go below coarse peak
+        magnitude: final_magnitude,
         delay_samples: refined_delay,
         doppler_hz: refined_doppler,
+        snr_db: refined_snr_db,
+        noise_floor: peak.noise_floor,
     }
 }
 
@@ -538,10 +601,15 @@ where
     let refined_doppler =
         surface.doppler_shifts[d_start].to_f64().unwrap() + local_d_offset * doppler_step;
 
+    // Recalculate SNR with refined magnitude
+    let refined_snr_db = 10.0 * (max_val / peak.noise_floor).log10();
+
     RefinedPeak {
         magnitude: max_val,
         delay_samples: refined_delay,
         doppler_hz: refined_doppler,
+        snr_db: refined_snr_db,
+        noise_floor: peak.noise_floor,
     }
 }
 
@@ -671,10 +739,12 @@ mod tests {
         println!("  Delay: {} samples", peak.delay_samples);
         println!("  Doppler: {} Hz", peak.doppler_hz);
         println!("  Magnitude: {}", peak.magnitude);
+        println!("  SNR: {:.1} dB", peak.snr_db);
 
         // Peak should be near (0, 0)
         assert!(peak.delay_samples.abs() < 2.0, "Expected delay near 0, got {}", peak.delay_samples);
         assert!(peak.doppler_hz.abs() < 100.0, "Expected Doppler near 0, got {}", peak.doppler_hz);
+        assert!(peak.snr_db > 0.0, "SNR should be positive for autocorrelation");
 
         // Plot
         plot::plot_caf_surface_3d(&surface, Some(&peak), "CAF: Autocorrelation");
@@ -723,10 +793,13 @@ mod tests {
         println!("  Found delay: {} samples", peak.delay_samples);
         println!("  Doppler: {} Hz", peak.doppler_hz);
         println!("  Magnitude: {}", peak.magnitude);
+        println!("  SNR: {:.1} dB", peak.snr_db);
+        println!("  Noise floor: {:.6}", peak.noise_floor);
 
         // Validate
         assert!((peak.delay_samples - time_delay as f64).abs() < 1.0);
         assert!(peak.doppler_hz.abs() < 100.0);
+        assert!(peak.snr_db > 0.0, "SNR should be positive for signal above noise");
 
         // Plot
         if should_plot {
@@ -748,7 +821,7 @@ mod tests {
         }
 
         let sample_rate = 1e6;
-        let length = 1024;
+        let length = 1048576; //2**20
         let freq_shift_hz = 100.0;
 
         // Generate common signal
@@ -767,8 +840,8 @@ mod tests {
         // CAF parameters
         let params = CafParams {
             time_step: 1,
-            freq_step_hz: 10.0,
-            doppler_range_hz: (-250.0, 250.0),
+            freq_step_hz: 500.0,
+            doppler_range_hz: (-20.0e3, 20.0e3),
             delay_range_samples: (-10.0, 10.0),
             sample_rate_hz: sample_rate,
         };
@@ -784,15 +857,17 @@ mod tests {
         println!("  Expected Doppler: {} Hz", freq_shift_hz);
         println!("  Found Doppler: {} Hz", peak.doppler_hz);
         println!("  Magnitude: {}", peak.magnitude);
-
-        // Validate
-        assert!(peak.delay_samples.abs() < 2.0);
-        assert!((peak.doppler_hz - freq_shift_hz).abs() < 50.0);
+        println!("  SNR: {:.1} dB", peak.snr_db);
 
         // Plot
         plot::plot_caf_surface_3d(&surface, Some(&peak), "CAF: Frequency Shift");
         plot::plot_caf_heatmap(&surface, Some(&peak), "CAF Heatmap: Frequency Shift");
         plot::plot_caf_slices(&surface, &peak, "CAF Slices: Frequency Shift");
+
+        // Validate
+        assert!(peak.delay_samples.abs() < 2.0);
+        assert!((peak.doppler_hz - freq_shift_hz).abs() < 50.0);
+        assert!(peak.snr_db > 0.0, "SNR should be positive for signal above noise");
     }
 
     #[test]
@@ -844,10 +919,12 @@ mod tests {
         println!("  Expected Doppler: {} Hz", freq_shift_hz);
         println!("  Found Doppler: {} Hz", peak.doppler_hz);
         println!("  Magnitude: {}", peak.magnitude);
+        println!("  SNR: {:.1} dB", peak.snr_db);
 
         // Validate
         assert!((peak.delay_samples - time_delay as f64).abs() < 2.0);
         assert!((peak.doppler_hz - freq_shift_hz).abs() < 50.0);
+        assert!(peak.snr_db > 0.0, "SNR should be positive for signal above noise");
 
         // Plot
         plot::plot_caf_surface_3d(&surface, Some(&peak), "CAF: TDOA + Doppler");
@@ -899,9 +976,12 @@ mod tests {
 
         println!("Interpolation comparison:");
         println!("  Expected: delay={} samples, Doppler={} Hz", time_delay, freq_shift_hz);
-        println!("  Coarse:      delay={:.2} samples, Doppler={:.2} Hz", coarse_peak.delay_samples, coarse_peak.doppler_hz);
-        println!("  Parabolic:   delay={:.2} samples, Doppler={:.2} Hz", parabolic_peak.delay_samples, parabolic_peak.doppler_hz);
-        println!("  Sinc:        delay={:.2} samples, Doppler={:.2} Hz", sinc_peak.delay_samples, sinc_peak.doppler_hz);
+        println!("  Coarse:      delay={:.2} samples, Doppler={:.2} Hz, SNR={:.1} dB",
+                 coarse_peak.delay_samples, coarse_peak.doppler_hz, coarse_peak.snr_db);
+        println!("  Parabolic:   delay={:.2} samples, Doppler={:.2} Hz, SNR={:.1} dB",
+                 parabolic_peak.delay_samples, parabolic_peak.doppler_hz, parabolic_peak.snr_db);
+        println!("  Sinc:        delay={:.2} samples, Doppler={:.2} Hz, SNR={:.1} dB",
+                 sinc_peak.delay_samples, sinc_peak.doppler_hz, sinc_peak.snr_db);
 
         // Both methods should improve accuracy
         let coarse_delay_error = (coarse_peak.delay_samples - time_delay as f64).abs();
@@ -910,6 +990,14 @@ mod tests {
 
         println!("  Delay errors: coarse={:.2}, parabolic={:.2}, sinc={:.2}",
                  coarse_delay_error, parabolic_delay_error, sinc_delay_error);
+
+        // Validate SNR values are consistent
+        assert!(parabolic_peak.snr_db > 0.0, "Parabolic SNR should be positive");
+        assert!(sinc_peak.snr_db > 0.0, "Sinc SNR should be positive");
+        assert!((parabolic_peak.noise_floor - coarse_peak.noise_floor).abs() < 1e-10,
+                "Noise floor should be consistent across interpolation");
+        assert!((sinc_peak.noise_floor - coarse_peak.noise_floor).abs() < 1e-10,
+                "Noise floor should be consistent across interpolation");
 
         // Plot
         plot::plot_caf_surface_3d(&surface, Some(&coarse_peak), "CAF: Interpolation Test");
@@ -1005,13 +1093,17 @@ mod plot {
     use super::*;
     use plotly::common::{ColorScale, ColorScalePalette, Mode};
     use plotly::layout::{Axis, Layout};
-    use plotly::{HeatMap, Plot, Scatter, Surface};
+    use plotly::{HeatMap, Plot, Scatter, Scatter3D, Surface};
 
     /// Plot 3D surface of CAF magnitude
-    pub fn plot_caf_surface_3d(surface: &CafSurface<f64>, _peak: Option<&Peak>, title: &str) {
+    pub fn plot_caf_surface_3d(surface: &CafSurface<f64>, peak: Option<&Peak>, title: &str) {
         let mut plot = Plot::new();
 
-        // Convert to dB for better visualization
+        // Estimate noise floor using median
+        let noise_floor = estimate_noise_floor(surface);
+        let noise_floor_db = 10.0 * noise_floor.log10();
+
+        // Convert to dB relative to noise floor
         let surface_db: Vec<Vec<f64>> = surface
             .surface
             .iter()
@@ -1019,7 +1111,9 @@ mod plot {
                 row.iter()
                     .map(|&val| {
                         if val > 0.0 {
-                            10.0 * val.log10()
+                            let val_db = 10.0 * val.log10();
+                            // Relative to noise floor, clamped at -100 dB
+                            (val_db - noise_floor_db).max(-100.0)
                         } else {
                             -100.0
                         }
@@ -1035,6 +1129,28 @@ mod plot {
 
         plot.add_trace(trace);
 
+        // Add 3D peak marker if provided
+        if let Some(pk) = peak {
+            // Convert peak magnitude to dB relative to noise floor
+            let peak_db = 10.0 * pk.magnitude.log10() - noise_floor_db;
+
+            let hover_text = format!(
+                "Peak<br>SNR: {:.1} dB<br>Delay: {:.2} samples<br>Doppler: {:.2} Hz",
+                pk.snr_db, pk.delay_samples, pk.doppler_hz
+            );
+
+            let marker_trace = Scatter3D::new(
+                vec![pk.delay_samples],
+                vec![pk.doppler_hz],
+                vec![peak_db],
+            )
+            .mode(Mode::Markers)
+            .name("Peak")
+            .text(hover_text);
+
+            plot.add_trace(marker_trace);
+        }
+
         let layout = Layout::new().title(title);
 
         plot.set_layout(layout);
@@ -1045,7 +1161,11 @@ mod plot {
     pub fn plot_caf_heatmap(surface: &CafSurface<f64>, peak: Option<&Peak>, title: &str) {
         let mut plot = Plot::new();
 
-        // Convert to dB
+        // Estimate noise floor using median
+        let noise_floor = estimate_noise_floor(surface);
+        let noise_floor_db = 10.0 * noise_floor.log10();
+
+        // Convert to dB relative to noise floor
         let surface_db: Vec<Vec<f64>> = surface
             .surface
             .iter()
@@ -1053,7 +1173,9 @@ mod plot {
                 row.iter()
                     .map(|&val| {
                         if val > 0.0 {
-                            10.0 * val.log10()
+                            let val_db = 10.0 * val.log10();
+                            // Relative to noise floor, clamped at -100 dB
+                            (val_db - noise_floor_db).max(-100.0)
                         } else {
                             -100.0
                         }
@@ -1077,6 +1199,18 @@ mod plot {
                 .mode(Mode::Markers)
                 .name("Peak");
             plot.add_trace(marker_trace);
+
+            // Add text annotation with peak details
+            let annotation_text = format!(
+                "SNR: {:.1} dB<br>Delay: {:.2} samples<br>Doppler: {:.2} Hz",
+                pk.snr_db, pk.delay_samples, pk.doppler_hz
+            );
+            let text_trace = Scatter::new(vec![pk.delay_samples], vec![pk.doppler_hz])
+                .mode(Mode::Text)
+                .text(annotation_text)
+                .text_position(plotly::common::Position::TopRight)
+                .show_legend(false);
+            plot.add_trace(text_trace);
         }
 
         let layout = Layout::new()
@@ -1094,10 +1228,21 @@ mod plot {
 
         let mut plot = Plot::new();
 
-        // Time slice at peak Doppler
+        // Estimate noise floor using median
+        let noise_floor = estimate_noise_floor(surface);
+        let noise_floor_db = 10.0 * noise_floor.log10();
+
+        // Time slice at peak Doppler (relative to noise floor)
         let time_slice: Vec<f64> = surface.surface[peak.doppler_idx]
             .iter()
-            .map(|&val| if val > 0.0 { 10.0 * val.log10() } else { -100.0 })
+            .map(|&val| {
+                if val > 0.0 {
+                    let val_db = 10.0 * val.log10();
+                    (val_db - noise_floor_db).max(-100.0)
+                } else {
+                    -100.0
+                }
+            })
             .collect();
 
         let time_trace = Scatter::new(
@@ -1109,14 +1254,15 @@ mod plot {
         .x_axis("x1")
         .y_axis("y1");
 
-        // Doppler slice at peak time
+        // Doppler slice at peak time (relative to noise floor)
         let doppler_slice: Vec<f64> = surface
             .surface
             .iter()
             .map(|row| {
                 let val = row[peak.delay_idx];
                 if val > 0.0 {
-                    10.0 * val.log10()
+                    let val_db = 10.0 * val.log10();
+                    (val_db - noise_floor_db).max(-100.0)
                 } else {
                     -100.0
                 }
@@ -1134,6 +1280,58 @@ mod plot {
 
         plot.add_trace(time_trace);
         plot.add_trace(doppler_trace);
+
+        // Add vertical markers at peak positions
+        // Calculate peak magnitude in dB relative to noise floor
+        let peak_db = 10.0 * peak.magnitude.log10() - noise_floor_db;
+
+        // Marker on time slice at peak delay
+        let time_marker = Scatter::new(
+            vec![peak.delay_samples, peak.delay_samples],
+            vec![-100.0, peak_db],
+        )
+        .mode(Mode::Lines)
+        .name("Peak Position")
+        .line(plotly::common::Line::new().dash(plotly::common::DashType::Dash))
+        .x_axis("x1")
+        .y_axis("y1")
+        .show_legend(false);
+        plot.add_trace(time_marker);
+
+        // Annotation on time slice
+        let time_annotation_y = peak_db + 5.0; // Position slightly above peak
+        let time_text = Scatter::new(vec![peak.delay_samples], vec![time_annotation_y])
+            .mode(Mode::Text)
+            .text(format!("SNR: {:.1} dB", peak.snr_db))
+            .text_position(plotly::common::Position::TopCenter)
+            .x_axis("x1")
+            .y_axis("y1")
+            .show_legend(false);
+        plot.add_trace(time_text);
+
+        // Marker on Doppler slice at peak Doppler
+        let doppler_marker = Scatter::new(
+            vec![peak.doppler_hz, peak.doppler_hz],
+            vec![-100.0, peak_db],
+        )
+        .mode(Mode::Lines)
+        .name("Peak Position")
+        .line(plotly::common::Line::new().dash(plotly::common::DashType::Dash))
+        .x_axis("x2")
+        .y_axis("y2")
+        .show_legend(false);
+        plot.add_trace(doppler_marker);
+
+        // Annotation on Doppler slice
+        let doppler_annotation_y = peak_db + 5.0; // Position slightly above peak
+        let doppler_text = Scatter::new(vec![peak.doppler_hz], vec![doppler_annotation_y])
+            .mode(Mode::Text)
+            .text(format!("SNR: {:.1} dB", peak.snr_db))
+            .text_position(plotly::common::Position::TopCenter)
+            .x_axis("x2")
+            .y_axis("y2")
+            .show_legend(false);
+        plot.add_trace(doppler_text);
 
         let layout = Layout::new()
             .title(title)
