@@ -188,7 +188,7 @@ where
     let min_delay = params.delay_range_samples.0;
     let max_delay = params.delay_range_samples.1;
     let n_time =
-        ((max_delay - min_delay) / params.time_step as f64).ceil() as usize + 1;
+        ((max_delay - min_delay) / (params.time_step as f64)).ceil() as usize + 1;
 
     let time_delays: Vec<T> = (0..n_time)
         .map(|i| T::from(min_delay + (i * params.time_step) as f64).unwrap())
