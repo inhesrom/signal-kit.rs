@@ -113,7 +113,7 @@ impl<T: Float> FskCarrier<T> {
                 // Accumulate phase (ensures continuity)
                 self.accumulated_phase = self.accumulated_phase + phase_increment;
 
-                // Wrap phase to [-�, �] to prevent numerical issues
+                // Wrap phase to [-π, π] to prevent numerical issues
                 while self.accumulated_phase > T::from(PI).unwrap() {
                     self.accumulated_phase = self.accumulated_phase - two_pi;
                 }

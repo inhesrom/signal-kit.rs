@@ -390,7 +390,7 @@ where
 
 /// Apply frequency shift in-place
 ///
-/// Multiplies signal by e^(j2�ft) for frequency offset f
+/// Multiplies signal by e^(j2πft) for frequency offset f
 fn freq_shift_inplace<T>(signal: &mut [Complex<T>], freq_hz: f64, sample_rate_hz: f64)
 where
     T: Float + FromPrimitive,
@@ -515,7 +515,7 @@ where
 
 /// Parabolic 2D interpolation for sub-sample peak refinement
 ///
-/// Fits a 2D parabola to the 3�3 neighborhood around the peak
+/// Fits a 2D parabola to the 3×3 neighborhood around the peak
 fn interpolate_parabolic_2d<T>(surface: &CafSurface<T>, peak: &Peak) -> RefinedPeak
 where
     T: Float + Debug,
@@ -549,7 +549,7 @@ where
     let z21 = surface.surface[d_idx + 1][t_idx].to_f64().unwrap();
     let z22 = surface.surface[d_idx + 1][t_idx + 1].to_f64().unwrap();
 
-    // Fit parabola: z = a + bx + cy + dx� + ey� + fxy
+    // Fit parabola: z = a + bx + cy + dx² + ey² + fxy
     // We only need the quadratic terms for peak location
 
     // Estimate derivatives using finite differences
@@ -563,8 +563,8 @@ where
     let d2z_dtdd = (z22 - z20 - z02 + z00) / 4.0;
 
     // Solve for peak offset using derivatives
-    // [d2z_dt2   d2z_dtdd ] [�t]   = - [dz_dt]
-    // [d2z_dtdd  d2z_dd2  ] [�d]       [dz_dd]
+    // [d2z_dt2   d2z_dtdd ] [Δt]   = - [dz_dt]
+    // [d2z_dtdd  d2z_dd2  ] [Δd]       [dz_dd]
 
     let det = d2z_dt2 * d2z_dd2 - d2z_dtdd * d2z_dtdd;
 
