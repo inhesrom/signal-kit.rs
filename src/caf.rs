@@ -797,9 +797,9 @@ mod tests {
         let n = signal.len();
         let shift = ((shift % n as isize) + n as isize) as usize % n;
 
-        let mut shifted = vec![signal[0].clone(); n];
+        let mut shifted = Vec::with_capacity(n);
         for i in 0..n {
-            shifted[i] = signal[(i + n - shift) % n].clone();
+            shifted.push(signal[(i + n - shift) % n].clone());
         }
         shifted
     }
