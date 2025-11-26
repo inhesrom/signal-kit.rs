@@ -377,7 +377,7 @@ mod tests {
         use std::env;
 
         let carrier = Carrier::new(ModType::_QPSK, 0.25, 0.0, 10.0, 0.15, 1e6, Some(0));
-        let oversample_rate = 1.0f64 / carrier.bandwidth;
+        let _oversample_rate = 1.0f64 / carrier.bandwidth;
         let signal_iq = carrier.generate(1_000_000);
 
         let slice: &[Complex<f32>] = &signal_iq;

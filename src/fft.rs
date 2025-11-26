@@ -55,7 +55,6 @@ pub fn fftfreqs<T: Float>(start: T, stop: T, num_points: usize) -> Vec<T> {
 #[cfg(test)]
 mod tests {
     use num_complex::{Complex};
-    use num_traits::FromBytes;
     use num_traits::{Float};
     use std::{env, vec};
 

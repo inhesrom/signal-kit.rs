@@ -509,7 +509,6 @@ mod tests {
     #[test]
     fn test_butterworth_preserves_dc() {
         use crate::generate::awgn::AWGN;
-        use crate::fft::fft;
 
         println!("\n=== PROOF: Butterworth Preserves DC ===\n");
 
