@@ -249,10 +249,9 @@ mod tests {
 
     #[test]
     fn test_freq_ampl_variation() {
-        use std::env;
+        use crate::test_utils::should_plot;
 
-        let plot = env::var("PLOT").unwrap_or_else(|_| "false".to_string());
-        if plot.to_lowercase() != "true" {
+        if !should_plot() {
             println!("Skipping frequency-dependent amplitude variation plot (set PLOT=true to enable)");
             return;
         }

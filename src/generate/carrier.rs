@@ -301,15 +301,14 @@ mod tests {
 
     #[test]
     fn test_carrier_combination_spectrum() {
-        use std::env;
         use crate::spectrum::welch::welch;
         use crate::spectrum::window::WindowType;
         use crate::vector_ops;
         use crate::plot::plot_spectrum;
+        use crate::test_utils::should_plot;
 
         // Check if plotting is enabled
-        let plot = env::var("PLOT").unwrap_or_else(|_| "false".to_string());
-        if plot.to_lowercase() != "true" {
+        if !should_plot() {
             println!("Skipping carrier combination spectrum plot (set PLOT=true to enable)");
             return;
         }
@@ -374,17 +373,15 @@ mod tests {
     fn test_carrier_with_awgn() {
         use num_complex::Complex;
         use crate::vector_ops;
-        use std::env;
 
         let carrier = Carrier::new(ModType::_QPSK, 0.25, 0.0, 10.0, 0.15, 1e6, Some(0));
-        let oversample_rate = 1.0f64 / carrier.bandwidth;
+        let _oversample_rate = 1.0f64 / carrier.bandwidth;
         let signal_iq = carrier.generate(1_000_000);
 
         let slice: &[Complex<f32>] = &signal_iq;
         let (freqs, spectrum) = welch(slice, 1e6, 2048, Some(512), Some(2048), crate::spectrum::window::WindowType::Rectangular, Some(AveragingMethod::Median));
 
-        let plot = env::var("PLOT").unwrap_or_else(|_| "false".to_string());
-        if plot.to_lowercase() == "true" {
+        if crate::test_utils::should_plot() {
             plot_spectrum(&freqs, &vector_ops::to_db(&spectrum), "SNR Comparison");
         }
     }

@@ -55,14 +55,14 @@ pub fn fftfreqs<T: Float>(start: T, stop: T, num_points: usize) -> Vec<T> {
 #[cfg(test)]
 mod tests {
     use num_complex::{Complex};
-    use num_traits::FromBytes;
     use num_traits::{Float};
-    use std::{env, vec};
+    use std::vec;
 
     use crate::complex_vec::ComplexVec;
     use crate::generate::cw::CW;
     use crate::fft::*;
     use crate::vector_ops;
+    use crate::test_utils::should_plot;
 
     fn assert_near<T: Float>(a: T, b: T, delta: T) {
         assert_eq!((a-b).abs() < delta, true);
@@ -83,9 +83,7 @@ mod tests {
 
         let freqs: Vec<f32> = fftfreqs::<f32>((-sample_rate_hz/2_f64) as f32, (sample_rate_hz/2_f64) as f32, blocksize);
 
-        let plot = env::var("PLOT").unwrap_or_else(|_| "false".to_string());
-        println!("PLOT env var is {}", plot);
-        if plot.to_lowercase() == "true" {
+        if should_plot() {
             use crate::plot::plot_spectrum;
             plot_spectrum(&freqs, &cw_fft_abs, "CW Signal Spectrum");
         }

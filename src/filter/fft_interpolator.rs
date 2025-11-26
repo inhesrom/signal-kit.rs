@@ -209,14 +209,13 @@ mod tests {
 
     #[test]
     fn test_bpsk_upsample_spectrum() {
-        use std::env;
         use crate::generate::psk_carrier::PskCarrier;
         use crate::mod_type::ModType;
         use crate::fft::{fft, fftshift, fftfreqs};
         use crate::vector_ops;
+        use crate::test_utils::should_plot;
 
-        let plot = env::var("PLOT").unwrap_or_else(|_| "false".to_string());
-        if plot.to_lowercase() != "true" {
+        if !should_plot() {
             println!("Skipping BPSK upsample spectrum plot (set PLOT=true to enable)");
             return;
         }

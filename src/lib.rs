@@ -1,4 +1,5 @@
 // Core data structures and utilities
+pub mod caf;
 pub mod complex_vec;
 pub mod fft;
 pub mod mod_type;
@@ -27,3 +28,7 @@ use pyo3::prelude::*;
 // Plot module only available in tests
 #[cfg(test)]
 pub mod plot;
+
+// Test utilities module
+#[cfg(test)]
+pub mod test_utils;

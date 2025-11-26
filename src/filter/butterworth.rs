@@ -158,14 +158,13 @@ mod tests {
 
     #[test]
     fn test_butterworth_spectrum() {
-        use std::env;
         use crate::spectrum::welch::welch;
         use crate::spectrum::window::WindowType;
         use crate::vector_ops;
         use crate::plot::plot_spectrum;
+        use crate::test_utils::should_plot;
 
-        let plot = env::var("PLOT").unwrap_or_else(|_| "false".to_string());
-        if plot.to_lowercase() != "true" {
+        if !should_plot() {
             println!("Skipping Butterworth filter spectrum plot (set PLOT=true to enable)");
             return;
         }
@@ -208,14 +207,13 @@ mod tests {
 
     #[test]
     fn test_filter_response() {
-        use std::env;
         use crate::spectrum::welch::welch;
         use crate::spectrum::window::WindowType;
         use crate::vector_ops;
         use crate::plot::plot_spectrum;
+        use crate::test_utils::should_plot;
 
-        let plot = env::var("PLOT").unwrap_or_else(|_| "false".to_string());
-        if plot.to_lowercase() != "true" {
+        if !should_plot() {
             println!("Skipping filter response plot (set PLOT=true to enable)");
             return;
         }
@@ -281,11 +279,10 @@ mod tests {
 
     #[test]
     fn test_impulse_response() {
-        use std::env;
         use crate::plot::plot_spectrum;
+        use crate::test_utils::should_plot;
 
-        let plot = env::var("PLOT").unwrap_or_else(|_| "false".to_string());
-        if plot.to_lowercase() != "true" {
+        if !should_plot() {
             println!("Skipping impulse response test (set PLOT=true to enable)");
             return;
         }
@@ -333,15 +330,14 @@ mod tests {
 
     #[test]
     fn test_dc_suppression_diagnostic() {
-        use std::env;
         use crate::spectrum::welch::welch;
         use crate::spectrum::window::WindowType;
         use crate::vector_ops;
         use crate::plot::plot_spectrum;
         use crate::fft::{fft, fftshift, fftfreqs};
+        use crate::test_utils::should_plot;
 
-        let plot = env::var("PLOT").unwrap_or_else(|_| "false".to_string());
-        if plot.to_lowercase() != "true" {
+        if !should_plot() {
             println!("Skipping DC suppression diagnostic (set PLOT=true to enable)");
             return;
         }
@@ -509,7 +505,6 @@ mod tests {
     #[test]
     fn test_butterworth_preserves_dc() {
         use crate::generate::awgn::AWGN;
-        use crate::fft::fft;
 
         println!("\n=== PROOF: Butterworth Preserves DC ===\n");
 
