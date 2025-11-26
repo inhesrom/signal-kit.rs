@@ -375,7 +375,7 @@ where
     let mut s2_freq = signal2.to_vec();
     fft(&mut s2_freq);
 
-    // Multiply conjugate: S1* � S2
+    // Multiply conjugate: S1* × S2
     let mut correlation_freq: Vec<Complex<T>> = s1_freq
         .iter()
         .zip(s2_freq.iter())
