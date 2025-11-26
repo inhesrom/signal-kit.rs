@@ -203,7 +203,7 @@ where
 
             // Extract delay range from correlation and downsample by time_step
             let downsampled: Vec<T> = (0..n_time)
-                .filter_map(|i| {
+                .map(|i| {
                     let delay_samples = min_delay + (i * params.time_step) as f64;
                     // Handle circular indexing for correlation
                     let mut idx = delay_samples.round() as isize;
@@ -211,7 +211,7 @@ where
                         idx = (n as isize + idx) % n as isize;
                     }
                     let idx = (idx as usize) % n;
-                    Some(correlation[idx].norm())
+                    correlation[idx].norm()
                 })
                 .collect();
 
