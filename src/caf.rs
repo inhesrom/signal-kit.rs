@@ -8,7 +8,6 @@ use num_traits::{Float, FromPrimitive, Signed};
 use rayon::prelude::*;
 use std::fmt::Debug;
 use std::ops::{DivAssign, RemAssign};
-use std::sync::{Arc, Mutex};
 
 use crate::fft::{fft, ifft};
 
@@ -195,14 +194,10 @@ where
         .map(|i| T::from(min_delay + (i * params.time_step) as f64).unwrap())
         .collect();
 
-    // Pre-allocate surface (will be filled in parallel)
-    let surface: Arc<Mutex<Vec<Vec<T>>>> = Arc::new(Mutex::new(vec![vec![T::zero(); n_time]; num_doppler]));
-
-    // Parallel processing over Doppler shifts
-    doppler_shifts
+    // Parallel processing over Doppler shifts (lock-free)
+    let surface_data: Vec<Vec<T>> = doppler_shifts
         .par_iter()
-        .enumerate()
-        .for_each(|(doppler_idx, &doppler_hz)| {
+        .map(|&doppler_hz| {
             let correlation =
                 compute_correlation_at_doppler(signal1, signal2, doppler_hz, params.sample_rate_hz);
 
@@ -220,16 +215,9 @@ where
                 })
                 .collect();
 
-            // Store in surface
-            let mut surf = surface.lock().unwrap();
-            surf[doppler_idx] = downsampled;
-        });
-
-    // Extract surface from Arc<Mutex<>>
-    let surface_data = Arc::try_unwrap(surface)
-        .expect("Failed to unwrap Arc")
-        .into_inner()
-        .expect("Failed to unwrap Mutex");
+            downsampled
+        })
+        .collect();
 
     // Build Doppler shift array (as T)
     let doppler_shifts_t: Vec<T> = doppler_shifts
