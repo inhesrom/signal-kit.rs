@@ -37,7 +37,7 @@ impl CW {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env;
+
     use crate::fft;
     use crate::complex_vec::ComplexVec;
 
@@ -55,8 +55,7 @@ mod tests {
 
         assert_eq!(samples.len(), block_size * num_blocks);
 
-        let plot = env::var("PLOT").unwrap_or_else(|_| "false".to_string());
-        if plot.to_lowercase() == "true" {
+        if crate::test_utils::should_plot() {
             fft::fft::<f64>(&mut samples);
             let mut cw_fft = ComplexVec::from_vec(samples);
             let mut cw_fft_abs: Vec<f64> = cw_fft.abs();

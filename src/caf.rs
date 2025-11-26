@@ -779,7 +779,7 @@ mod tests {
     use super::*;
     use crate::generate::AWGN;
     use crate::ComplexVec;
-    use std::env;
+    use crate::test_utils::should_plot;
 
     /// Helper function to generate test signal with AWGN
     fn generate_test_signal(length: usize, sample_rate: f64, seed: u64) -> ComplexVec<f64> {
@@ -806,10 +806,7 @@ mod tests {
 
     #[test]
     fn test_caf_autocorrelation() {
-        let plot = env::var("PLOT").unwrap_or_else(|_| "false".to_string());
-        let should_plot = plot.to_lowercase() == "true";
-
-        if !should_plot {
+        if !should_plot() {
             println!("Skipping test_caf_autocorrelation plot (set PLOT=true to enable)");
             return;
         }
@@ -854,9 +851,6 @@ mod tests {
 
     #[test]
     fn test_caf_time_delay() {
-        let plot = env::var("PLOT").unwrap_or_else(|_| "false".to_string());
-        let should_plot = plot.to_lowercase() == "true";
-
         let sample_rate = 1e6;
         let length = 1024;
         let time_delay = 50; // samples
@@ -902,7 +896,7 @@ mod tests {
         assert!(peak.snr_db > 0.0, "SNR should be positive for signal above noise");
 
         // Plot
-        if should_plot {
+        if should_plot() {
             plot::plot_caf_surface_3d(&surface, Some(&peak), "CAF: Time Delay");
             plot::plot_caf_heatmap(&surface, Some(&peak), "CAF Heatmap: Time Delay");
             plot::plot_caf_slices(&surface, &peak, "CAF Slices: Time Delay");
@@ -912,10 +906,7 @@ mod tests {
 
     #[test]
     fn test_caf_frequency_shift() {
-        let plot = env::var("PLOT").unwrap_or_else(|_| "false".to_string());
-        let should_plot = plot.to_lowercase() == "true";
-
-        if !should_plot {
+        if !should_plot() {
             println!("Skipping test_caf_frequency_shift plot (set PLOT=true to enable)");
             return;
         }
@@ -972,10 +963,7 @@ mod tests {
 
     #[test]
     fn test_caf_tdoa_doppler_combined() {
-        let plot = env::var("PLOT").unwrap_or_else(|_| "false".to_string());
-        let should_plot = plot.to_lowercase() == "true";
-
-        if !should_plot {
+        if !should_plot() {
             println!("Skipping test_caf_tdoa_doppler_combined plot (set PLOT=true to enable)");
             return;
         }
@@ -1034,10 +1022,7 @@ mod tests {
 
     #[test]
     fn test_caf_interpolation() {
-        let plot = env::var("PLOT").unwrap_or_else(|_| "false".to_string());
-        let should_plot = plot.to_lowercase() == "true";
-
-        if !should_plot {
+        if !should_plot() {
             println!("Skipping test_caf_interpolation plot (set PLOT=true to enable)");
             return;
         }
@@ -1239,8 +1224,7 @@ mod tests {
         println!("  Found FDOA: {:.2} Hz", peak.doppler_hz);
         println!("  SNR: {:.1} dB", peak.snr_db);
 
-        let plot: bool = env::var("PLOT").unwrap_or_else(|_| "false".to_string()).to_lowercase() == "true";
-        if plot {
+        if should_plot() {
             plot::plot_caf_surface_3d(&surface, Some(&peak), "CAF: Autocorrelation");
             plot::plot_caf_heatmap(&surface, Some(&peak), "CAF Heatmap: Autocorrelation");
             plot::plot_caf_slices(&surface, &peak, "CAF Slices: Autocorrelation");

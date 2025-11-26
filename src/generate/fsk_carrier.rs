@@ -175,7 +175,7 @@ mod tests {
     use crate::generate::awgn::AWGN;
     use crate::fft::{fft, fftshift, fftfreqs};
     use crate::vector_ops;
-    use std::env;
+
 
     #[test]
     fn test_fsk_basic() {
@@ -252,8 +252,9 @@ mod tests {
 
     #[test]
     fn test_fsk_with_awgn_spectrum() {
-        let plot = env::var("PLOT").unwrap_or_else(|_| "false".to_string());
-        if plot.to_lowercase() != "true" {
+        use crate::test_utils::should_plot;
+        
+        if !should_plot() {
             println!("Skipping FSK with AWGN spectrum plot (set PLOT=true to enable)");
             return;
         }

@@ -447,14 +447,11 @@ mod tests {
 
     #[test]
     fn test_channel_spectrum_with_snr_verification() {
-        use std::env;
         use crate::spectrum::welch::welch;
         use crate::spectrum::window::WindowType;
         use crate::vector_ops;
         use crate::plot::plot_spectrum;
-
-        // Check if plotting is enabled
-        let plot = env::var("PLOT").unwrap_or_else(|_| "false".to_string());
+        use crate::test_utils::should_plot;
 
         let sample_rate = 1e6;
         let num_samples = (2.0).powf(20.0) as usize;
@@ -515,7 +512,7 @@ mod tests {
         println!("Noise floor: {:.6} dB ({:.2e} linear)", noise_floor_db, noise_floor);
 
         // Only plot if enabled
-        if plot.to_lowercase() == "true" {
+        if should_plot() {
             // Convert ComplexVec to Vec<Complex<f64>> for Welch processing
             let signal: Vec<_> = (0..combined.len()).map(|i| combined[i]).collect();
 
@@ -561,14 +558,11 @@ mod tests {
 
     #[test]
     fn test_channel_with_multiple_impairments() {
-        use std::env;
         use crate::spectrum::welch::welch;
         use crate::spectrum::window::WindowType;
         use crate::vector_ops;
         use crate::plot::plot_spectrum;
-
-        // Check if plotting is enabled
-        let plot = env::var("PLOT").unwrap_or_else(|_| "false".to_string());
+        use crate::test_utils::should_plot;
 
         let sample_rate = 1e6;
         let num_samples = 1_000_000;
@@ -619,7 +613,7 @@ mod tests {
         assert_eq!(result.len(), num_samples);
 
         // Only plot if enabled
-        if plot.to_lowercase() == "true" {
+        if should_plot() {
             // Convert ComplexVec to Vec<Complex<f64>> for Welch processing
             let signal: Vec<_> = (0..result.len()).map(|i| result[i]).collect();
 
@@ -646,14 +640,11 @@ mod tests {
 
     #[test]
     fn test_channel_with_custom_digitizer_droop() {
-        use std::env;
         use crate::spectrum::welch::welch;
         use crate::spectrum::window::WindowType;
         use crate::vector_ops;
         use crate::plot::plot_spectrum;
-
-        // Check if plotting is enabled
-        let plot = env::var("PLOT").unwrap_or_else(|_| "false".to_string());
+        use crate::test_utils::should_plot;
 
         let sample_rate = 1e6;
         let num_samples = 25000;
@@ -688,7 +679,7 @@ mod tests {
         println!("  (Steeper rolloff than AD9361, but not as steep as traditional)");
 
         // Only plot if enabled
-        if plot.to_lowercase() == "true" {
+        if should_plot() {
             // Convert ComplexVec to Vec<Complex<f64>> for Welch processing
             let signal: Vec<_> = (0..result.len()).map(|i| result[i]).collect();
 
