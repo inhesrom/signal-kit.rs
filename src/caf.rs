@@ -1239,7 +1239,7 @@ mod tests {
         println!("  Found FDOA: {:.2} Hz", peak.doppler_hz);
         println!("  SNR: {:.1} dB", peak.snr_db);
 
-        let plot: bool = env::var("PLOT").unwrap_or_else(|_| "false".to_string()) == "true".to_string();
+        let plot: bool = env::var("PLOT").unwrap_or_else(|_| "false".to_string()).to_lowercase() == "true";
         if plot {
             plot::plot_caf_surface_3d(&surface, Some(&peak), "CAF: Autocorrelation");
             plot::plot_caf_heatmap(&surface, Some(&peak), "CAF Heatmap: Autocorrelation");
