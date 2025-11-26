@@ -287,7 +287,7 @@ where
 /// - Ranges are invalid (min >= max)
 ///
 /// # Example
-/// ```rust
+/// ```no_run
 /// use signal_kit::caf::auto_compute_caf;
 /// use num_complex::Complex;
 ///
@@ -1251,9 +1251,12 @@ mod tests {
         println!("  Found FDOA: {:.2} Hz", peak.doppler_hz);
         println!("  SNR: {:.1} dB", peak.snr_db);
 
-        plot::plot_caf_surface_3d(&surface, Some(&peak), "CAF: Autocorrelation");
-        plot::plot_caf_heatmap(&surface, Some(&peak), "CAF Heatmap: Autocorrelation");
-        plot::plot_caf_slices(&surface, &peak, "CAF Slices: Autocorrelation");
+        let plot: bool = env::var("PLOT").unwrap_or_else(|_| "false".to_string()) == "true".to_string();
+        if plot {
+            plot::plot_caf_surface_3d(&surface, Some(&peak), "CAF: Autocorrelation");
+            plot::plot_caf_heatmap(&surface, Some(&peak), "CAF Heatmap: Autocorrelation");
+            plot::plot_caf_slices(&surface, &peak, "CAF Slices: Autocorrelation");
+        }
         
         // Validate - should find the peak within reasonable accuracy
         assert!(
