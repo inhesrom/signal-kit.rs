@@ -244,6 +244,118 @@ where
     })
 }
 
+/// Compute CAF with automatic parameter calculation
+///
+/// This function automatically calculates optimal/required `time_step` and `freq_step_hz`
+/// based on signal characteristics, providing a simpler interface than `compute_caf`.
+///
+/// # Auto-Calculated Parameters
+///
+/// ## Integration Time and Frequency Resolution
+/// The integration time T = N/Fs (signal length / sample rate) determines the
+/// frequency resolution:
+/// - Main lobe width: Δf ≈ 1/T Hz
+/// - freq_step_hz = (1/T) / points_per_mainlobe
+///
+/// Example: 1,048,576 samples at 1 MHz → T ≈ 1.05 s → Δf ≈ 0.95 Hz
+/// With points_per_mainlobe=2 → freq_step ≈ 0.475 Hz
+///
+/// ## Bandwidth and Delay Resolution
+/// The signal bandwidth determines delay resolution:
+/// - Main lobe width: Δτ ≈ 1/B samples
+/// - time_step = max(1, floor((1/B) / points_per_mainlobe))
+///
+/// For narrowband signals (B << Fs), time_step defaults to 1.
+/// For wideband signals, coarser stepping is used.
+///
+/// # Arguments
+/// * `signal1` - Reference signal (complex samples)
+/// * `signal2` - Target signal (complex samples)
+/// * `sample_rate_hz` - Sample rate in Hz
+/// * `bandwidth_hz` - Signal bandwidth in Hz (occupied spectrum)
+/// * `doppler_range_hz` - Doppler search range (min, max) in Hz
+/// * `time_delay_range` - Time delay search range (min, max) in seconds
+/// * `points_per_mainlobe` - Sampling density (default: 2). Higher values give
+///   finer resolution but increase computation. Typical range: 2-4.
+///
+/// # Returns
+/// CAF surface with automatically optimized resolution
+///
+/// # Errors
+/// Returns `CafError` if:
+/// - Signal lengths don't match
+/// - Ranges are invalid (min >= max)
+///
+/// # Example
+/// ```rust
+/// use signal_kit::caf::auto_compute_caf;
+/// use num_complex::Complex;
+///
+/// let sample_rate = 1e6; // 1 MHz
+/// let bandwidth = 10e3;   // 10 kHz signal
+/// let signal1: Vec<Complex<f64>> = vec![/* ... */];
+/// let signal2: Vec<Complex<f64>> = vec![/* ... */];
+///
+/// let surface = auto_compute_caf(
+///     &signal1,
+///     &signal2,
+///     sample_rate,
+///     bandwidth,
+///     (-1000.0, 1000.0),    // Doppler range: ±1 kHz
+///     (-0.001, 0.001),      // Time delay range: ±1 ms
+///     None,                 // Use default points_per_mainlobe = 2
+/// )?;
+/// # Ok::<(), signal_kit::caf::CafError>(())
+/// ```
+pub fn auto_compute_caf<T>(
+    signal1: &[Complex<T>],
+    signal2: &[Complex<T>],
+    sample_rate_hz: f64,
+    bandwidth_hz: f64,
+    doppler_range_hz: (f64, f64),
+    time_delay_range: (f64, f64),
+    points_per_mainlobe: Option<usize>,
+) -> Result<CafSurface<T>, CafError>
+where
+    T: Float + RemAssign + DivAssign + Send + Sync + FromPrimitive + Signed + Debug + 'static,
+{
+    // Use default of 2 points per mainlobe if not specified
+    let ppm = points_per_mainlobe.unwrap_or(2);
+
+    // Calculate integration time T = N / Fs
+    let n = signal1.len() as f64;
+    let integration_time = n / sample_rate_hz;
+
+    // Calculate frequency step based on frequency resolution (1/T)
+    // freq_step = (1/T) / points_per_mainlobe
+    let freq_resolution = 1.0 / integration_time;
+    let freq_step_hz = freq_resolution / (ppm as f64);
+
+    // Calculate delay step based on delay resolution (1/B)
+    // For narrowband signals, this will be large → time_step = 1
+    // For wideband signals, this allows coarser stepping
+    let delay_resolution_samples = sample_rate_hz / bandwidth_hz;
+    let time_step = (delay_resolution_samples / (ppm as f64)).floor().max(1.0) as usize;
+
+    // Convert time delay range from seconds to samples
+    let delay_range_samples = (
+        time_delay_range.0 * sample_rate_hz,
+        time_delay_range.1 * sample_rate_hz,
+    );
+
+    // Build parameters
+    let params = CafParams {
+        time_step,
+        freq_step_hz,
+        doppler_range_hz,
+        delay_range_samples,
+        sample_rate_hz,
+    };
+
+    // Call the main compute_caf function
+    compute_caf(signal1, signal2, &params)
+}
+
 /// Compute correlation at a specific Doppler shift
 ///
 /// # Arguments
@@ -737,7 +849,7 @@ mod tests {
 
         println!("Autocorrelation peak:");
         println!("  Delay: {} samples", peak.delay_samples);
-        println!("  Doppler: {} Hz", peak.doppler_hz);
+        println!("  FDOA: {} Hz", peak.doppler_hz);
         println!("  Magnitude: {}", peak.magnitude);
         println!("  SNR: {:.1} dB", peak.snr_db);
 
@@ -791,7 +903,7 @@ mod tests {
         println!("Time delay peak:");
         println!("  Expected delay: {} samples", time_delay);
         println!("  Found delay: {} samples", peak.delay_samples);
-        println!("  Doppler: {} Hz", peak.doppler_hz);
+        println!("  FDOA: {} Hz", peak.doppler_hz);
         println!("  Magnitude: {}", peak.magnitude);
         println!("  SNR: {:.1} dB", peak.snr_db);
         println!("  Noise floor: {:.6}", peak.noise_floor);
@@ -822,7 +934,7 @@ mod tests {
 
         let sample_rate = 1e6;
         let length = 1048576; //2**20
-        let freq_shift_hz = 100.0;
+        let freq_shift_hz = 500.0;
 
         // Generate common signal
         let signal_common = generate_test_signal(length, sample_rate, 42);
@@ -840,7 +952,7 @@ mod tests {
         // CAF parameters
         let params = CafParams {
             time_step: 1,
-            freq_step_hz: 500.0,
+            freq_step_hz: 50.0,
             doppler_range_hz: (-20.0e3, 20.0e3),
             delay_range_samples: (-10.0, 10.0),
             sample_rate_hz: sample_rate,
@@ -854,8 +966,8 @@ mod tests {
 
         println!("Frequency shift peak:");
         println!("  Delay: {} samples", peak.delay_samples);
-        println!("  Expected Doppler: {} Hz", freq_shift_hz);
-        println!("  Found Doppler: {} Hz", peak.doppler_hz);
+        println!("  Expected FDOA: {} Hz", freq_shift_hz);
+        println!("  Found FDOA: {} Hz", peak.doppler_hz);
         println!("  Magnitude: {}", peak.magnitude);
         println!("  SNR: {:.1} dB", peak.snr_db);
 
@@ -916,8 +1028,8 @@ mod tests {
         println!("Combined TDOA+Doppler peak:");
         println!("  Expected delay: {} samples", time_delay);
         println!("  Found delay: {} samples", peak.delay_samples);
-        println!("  Expected Doppler: {} Hz", freq_shift_hz);
-        println!("  Found Doppler: {} Hz", peak.doppler_hz);
+        println!("  Expected FDOA: {} Hz", freq_shift_hz);
+        println!("  Found FDOA: {} Hz", peak.doppler_hz);
         println!("  Magnitude: {}", peak.magnitude);
         println!("  SNR: {:.1} dB", peak.snr_db);
 
@@ -1086,6 +1198,80 @@ mod tests {
             panic!("Expected SignalLengthMismatch error");
         }
     }
+
+    #[test]
+    fn test_auto_compute_caf() {
+        let sample_rate = 1e6;
+        let bandwidth = 10e3; // 10 kHz bandwidth
+        let length = 65536; // Longer signal for better frequency resolution
+        let time_delay = 50; // samples
+        let freq_shift_hz = 100.0;
+
+        // Generate common signal
+        let signal_common = generate_test_signal(length, sample_rate, 42);
+        let noise1 = generate_test_signal(length, sample_rate, 100);
+        let noise2 = generate_test_signal(length, sample_rate, 200);
+
+        // signal1 = common + noise1 * 0.1
+        let signal1 = &signal_common + &(&noise1 * 0.1);
+
+        // signal2 = freq_shift(time_shift(common)) + noise2 * 0.1
+        let mut signal_common_shifted = ComplexVec::from_vec(circular_shift(&signal_common, time_delay as isize));
+        signal_common_shifted.freq_shift(freq_shift_hz, sample_rate);
+        let signal2 = &signal_common_shifted + &(&noise2 * 0.1);
+
+        // Use auto_compute_caf
+        let surface = auto_compute_caf(
+            &signal1,
+            &signal2,
+            sample_rate,
+            bandwidth,
+            (-500.0, 500.0),                     // Doppler range in Hz
+            (-0.001, 0.001),                     // Time delay range in seconds (±1 ms)
+            None,                                 // Use default points_per_mainlobe = 2
+        )
+        .unwrap();
+
+        // Find peak
+        let peak = find_peak(&surface);
+
+        // Calculate what the auto parameters should be
+        let integration_time = length as f64 / sample_rate;
+        let freq_resolution = 1.0 / integration_time;
+        let expected_freq_step = freq_resolution / 2.0;
+
+        println!("Auto CAF peak:");
+        println!("  Signal length: {} samples", length);
+        println!("  Integration time: {:.6} s", integration_time);
+        println!("  Frequency resolution: {:.2} Hz", freq_resolution);
+        println!("  Auto freq step: {:.2} Hz", expected_freq_step);
+        println!("  Expected delay: {} samples", time_delay);
+        println!("  Found delay: {:.2} samples", peak.delay_samples);
+        println!("  Expected FDOA: {} Hz", freq_shift_hz);
+        println!("  Found FDOA: {:.2} Hz", peak.doppler_hz);
+        println!("  SNR: {:.1} dB", peak.snr_db);
+
+        plot::plot_caf_surface_3d(&surface, Some(&peak), "CAF: Autocorrelation");
+        plot::plot_caf_heatmap(&surface, Some(&peak), "CAF Heatmap: Autocorrelation");
+        plot::plot_caf_slices(&surface, &peak, "CAF Slices: Autocorrelation");
+        
+        // Validate - should find the peak within reasonable accuracy
+        assert!(
+            (peak.delay_samples - time_delay as f64).abs() < 2.0,
+            "Delay error too large: expected {}, got {}",
+            time_delay,
+            peak.delay_samples
+        );
+        // With better resolution, Doppler should be within freq_step/2
+        assert!(
+            (peak.doppler_hz - freq_shift_hz).abs() < expected_freq_step,
+            "Doppler error too large: expected {}, got {}, freq_step={}",
+            freq_shift_hz,
+            peak.doppler_hz,
+            expected_freq_step
+        );
+        assert!(peak.snr_db > 0.0, "SNR should be positive");
+    }
 }
 
 #[cfg(test)]
@@ -1135,7 +1321,7 @@ mod plot {
             let peak_db = 10.0 * pk.magnitude.log10() - noise_floor_db;
 
             let hover_text = format!(
-                "Peak<br>SNR: {:.1} dB<br>Delay: {:.2} samples<br>Doppler: {:.2} Hz",
+                "Peak<br>SNR: {:.1} dB<br>Delay: {:.2} samples<br>FDOA: {:.2} Hz",
                 pk.snr_db, pk.delay_samples, pk.doppler_hz
             );
 
@@ -1202,7 +1388,7 @@ mod plot {
 
             // Add text annotation with peak details
             let annotation_text = format!(
-                "SNR: {:.1} dB<br>Delay: {:.2} samples<br>Doppler: {:.2} Hz",
+                "SNR: {:.1} dB<br>Delay: {:.2} samples<br>FDOA: {:.2} Hz",
                 pk.snr_db, pk.delay_samples, pk.doppler_hz
             );
             let text_trace = Scatter::new(vec![pk.delay_samples], vec![pk.doppler_hz])
