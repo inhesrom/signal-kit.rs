@@ -308,7 +308,7 @@ where
     T: Float + RemAssign + DivAssign + Send + Sync + FromPrimitive + Signed + Debug + 'static,
 {
     // Use default of 2 points per mainlobe if not specified
-    let ppm = points_per_mainlobe.unwrap_or(2);
+    let points_per_mainlobe_value = points_per_mainlobe.unwrap_or(2);
 
     // Calculate integration time T = N / Fs
     let n = signal1.len() as f64;
@@ -317,13 +317,13 @@ where
     // Calculate frequency step based on frequency resolution (1/T)
     // freq_step = (1/T) / points_per_mainlobe
     let freq_resolution = 1.0 / integration_time;
-    let freq_step_hz = freq_resolution / (ppm as f64);
+    let freq_step_hz = freq_resolution / (points_per_mainlobe_value as f64);
 
     // Calculate delay step based on delay resolution (1/B)
     // For narrowband signals, this will be large → time_step = 1
     // For wideband signals, this allows coarser stepping
     let delay_resolution_samples = sample_rate_hz / bandwidth_hz;
-    let time_step = (delay_resolution_samples / (ppm as f64)).floor().max(1.0) as usize;
+    let time_step = (delay_resolution_samples / (points_per_mainlobe_value as f64)).floor().max(1.0) as usize;
 
     // Convert time delay range from seconds to samples
     let delay_range_samples = (
