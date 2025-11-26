@@ -20,10 +20,6 @@ pub use complex_vec::ComplexVec;
 pub use mod_type::ModType;
 
 // Re-export commonly used items from submodules
-pub use caf::{
-    auto_compute_caf, compute_caf, find_peak, interpolate_peak, CafError, CafParams, CafSurface,
-    InterpolationMethod, Peak, RefinedPeak,
-};
 pub use generate::{Carrier, Channel};
 
 #[cfg(feature = "python")]
