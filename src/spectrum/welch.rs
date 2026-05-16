@@ -3,7 +3,7 @@
 use num_complex::Complex;
 use num_traits::Float;
 use crate::spectrum::window::{WindowType, generate_window, window_energy};
-use crate::fft::{fft, fftfreqs, fftshift};
+use crate::fft::{fft, fftshift};
 
 /// Averaging method for combining periodograms
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -49,6 +49,8 @@ where
 {
     // Compute defaults
     let (overlap, fft_len) = compute_defaults(nperseg, noverlap, nfft);
+    validate_welch_parameters(sample_rate, nperseg, overlap, fft_len);
+
     let avg_method = averaging.unwrap_or(AveragingMethod::Mean);
 
     // Generate window
@@ -78,9 +80,8 @@ where
     // Shift PSD to center DC component
     fftshift(&mut normalized_psd);
 
-    // Generate two-sided frequency axis from -fs/2 to +fs/2
-    let two = T::from(2.0).unwrap();
-    let freqs = fftfreqs(-sample_rate / two, sample_rate / two, fft_len);
+    // Generate two-sided frequency axis with FFT bin spacing
+    let freqs = centered_frequency_bins(sample_rate, fft_len);
 
     (freqs, normalized_psd)
 }
@@ -94,6 +95,32 @@ fn compute_defaults(
     let overlap = noverlap.unwrap_or(nperseg / 2);
     let fft_len = nfft.unwrap_or(nperseg);
     (overlap, fft_len)
+}
+
+/// Validate Welch parameters after optional defaults are applied.
+fn validate_welch_parameters<T: Float>(
+    sample_rate: T,
+    nperseg: usize,
+    noverlap: usize,
+    nfft: usize,
+) {
+    assert!(nperseg > 0, "nperseg must be greater than 0");
+    assert!(sample_rate > T::zero(), "sample_rate must be positive");
+    assert!(noverlap < nperseg, "noverlap must be less than nperseg");
+    assert!(
+        nfft >= nperseg,
+        "nfft must be greater than or equal to nperseg"
+    );
+}
+
+/// Generate centered Welch frequency bins using FFT bin spacing.
+fn centered_frequency_bins<T: Float>(sample_rate: T, nfft: usize) -> Vec<T> {
+    let spacing = sample_rate / T::from(nfft).unwrap();
+    let center = T::from(nfft / 2).unwrap();
+
+    (0..nfft)
+        .map(|i| (T::from(i).unwrap() - center) * spacing)
+        .collect()
 }
 
 /// Extract overlapping segments from the signal
@@ -127,7 +154,7 @@ where
     // Apply window
     let windowed = apply_window(segment, window);
 
-    // Pad or truncate to nfft length
+    // Zero-pad to nfft length when requested
     let mut fft_input = prepare_fft_input(windowed, nfft);
 
     // Compute FFT
@@ -146,16 +173,13 @@ fn apply_window<T: Float>(segment: &[Complex<T>], window: &[T]) -> Vec<Complex<T
         .collect()
 }
 
-/// Prepare FFT input by padding or truncating
+/// Prepare FFT input by zero-padding when needed.
 fn prepare_fft_input<T: Float>(windowed: Vec<Complex<T>>, nfft: usize) -> Vec<Complex<T>> {
     let mut fft_input = windowed;
 
     if nfft > fft_input.len() {
         // Zero-pad
         fft_input.resize(nfft, Complex::new(T::zero(), T::zero()));
-    } else if nfft < fft_input.len() {
-        // Truncate
-        fft_input.truncate(nfft);
     }
 
     fft_input
@@ -289,6 +313,104 @@ mod tests {
     use crate::generate::fsk_carrier::FskCarrier;
     use crate::generate::psk_carrier::PskCarrier;
     use crate::mod_type::ModType;
+
+    #[test]
+    fn test_welch_frequency_axis_even_nfft() {
+        let signal = vec![Complex::new(1.0_f64, 0.0); 16];
+        let (freqs, psd) = welch(
+            &signal,
+            8.0,
+            8,
+            Some(0),
+            Some(8),
+            WindowType::Rectangular,
+            None,
+        );
+
+        assert_eq!(freqs, vec![-4.0, -3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0]);
+        assert_eq!(freqs[8 / 2], 0.0);
+        assert_eq!(psd.len(), 8);
+    }
+
+    #[test]
+    fn test_welch_frequency_axis_odd_nfft() {
+        let signal = vec![Complex::new(1.0_f64, 0.0); 18];
+        let (freqs, psd) = welch(
+            &signal,
+            9.0,
+            9,
+            Some(0),
+            Some(9),
+            WindowType::Rectangular,
+            None,
+        );
+
+        assert_eq!(freqs, vec![-4.0, -3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(freqs[9 / 2], 0.0);
+        assert_eq!(psd.len(), 9);
+    }
+
+    #[test]
+    #[should_panic(expected = "noverlap must be less than nperseg")]
+    fn test_welch_rejects_full_overlap() {
+        let signal = vec![Complex::new(1.0_f64, 0.0); 16];
+        welch(
+            &signal,
+            8.0,
+            8,
+            Some(8),
+            None,
+            WindowType::Hann,
+            None,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "noverlap must be less than nperseg")]
+    fn test_welch_rejects_overlap_greater_than_segment() {
+        let signal = vec![Complex::new(1.0_f64, 0.0); 16];
+        welch(
+            &signal,
+            8.0,
+            8,
+            Some(9),
+            None,
+            WindowType::Hann,
+            None,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "nfft must be greater than or equal to nperseg")]
+    fn test_welch_rejects_short_fft() {
+        let signal = vec![Complex::new(1.0_f64, 0.0); 16];
+        welch(
+            &signal,
+            8.0,
+            8,
+            Some(0),
+            Some(4),
+            WindowType::Hann,
+            None,
+        );
+    }
+
+    #[test]
+    fn test_welch_allows_zero_padded_fft() {
+        let signal = vec![Complex::new(1.0_f64, 0.0); 16];
+        let (freqs, psd) = welch(
+            &signal,
+            16.0,
+            8,
+            Some(0),
+            Some(16),
+            WindowType::Hann,
+            None,
+        );
+
+        assert_eq!(freqs.len(), 16);
+        assert_eq!(psd.len(), 16);
+    }
 
     #[test]
     fn test_welch_basic() {
