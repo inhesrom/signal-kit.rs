@@ -7,7 +7,7 @@ This directory contains utility scripts for setting up and working with signal-k
 | Script | Purpose |
 |--------|---------|
 | `setup_python_env.sh` | Create venv, install maturin, pytest, numpy |
-| `build_and_test_release.sh` | Build optimized wheels and run full test suite |
+| `build_and_test_python_release.sh` | Build optimized wheels and run full test suite |
 
 ---
 
