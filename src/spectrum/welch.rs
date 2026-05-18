@@ -34,7 +34,8 @@ pub enum AveragingMethod {
 ///
 /// # Returns
 /// Tuple of (frequencies, psd) where frequencies are in Hz and psd is in power/Hz.
-/// Returns two-sided spectrum from -fs/2 to +fs/2 for complex input signals.
+/// Frequencies are centered FFT bins spaced by `sample_rate / nfft`. For even
+/// `nfft`, the last bin is `+fs/2 - df`.
 pub fn welch<T>(
     signal: &[Complex<T>],
     sample_rate: T,
@@ -348,6 +349,51 @@ mod tests {
         assert_eq!(freqs, vec![-4.0, -3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0, 4.0]);
         assert_eq!(freqs[9 / 2], 0.0);
         assert_eq!(psd.len(), 9);
+    }
+
+    #[test]
+    #[should_panic(expected = "nperseg must be greater than 0")]
+    fn test_welch_rejects_zero_segment_length() {
+        let signal = vec![Complex::new(1.0_f64, 0.0); 16];
+        welch(
+            &signal,
+            8.0,
+            0,
+            None,
+            None,
+            WindowType::Hann,
+            None,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "sample_rate must be positive")]
+    fn test_welch_rejects_zero_sample_rate() {
+        let signal = vec![Complex::new(1.0_f64, 0.0); 16];
+        welch(
+            &signal,
+            0.0,
+            8,
+            Some(0),
+            None,
+            WindowType::Hann,
+            None,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "sample_rate must be positive")]
+    fn test_welch_rejects_negative_sample_rate() {
+        let signal = vec![Complex::new(1.0_f64, 0.0); 16];
+        welch(
+            &signal,
+            -8.0,
+            8,
+            Some(0),
+            None,
+            WindowType::Hann,
+            None,
+        );
     }
 
     #[test]

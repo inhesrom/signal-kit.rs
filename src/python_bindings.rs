@@ -519,7 +519,8 @@ fn validate_welch_nfft(nperseg: usize, nfft: Option<usize>) -> PyResult<()> {
 ///
 /// Returns:
 ///     tuple: (frequencies, psd) where both are numpy arrays (float64)
-///            frequencies are in Hz from -fs/2 to +fs/2
+///            frequencies are centered FFT bins spaced by sample_rate / nfft;
+///            for even nfft, the last bin is +fs/2 - df
 ///            psd is in power/Hz
 ///
 /// Example:

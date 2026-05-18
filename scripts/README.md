@@ -131,7 +131,7 @@ pytest tests/python/
 
 ---
 
-## build_and_test_release.sh
+## build_and_test_python_release.sh
 
 Build optimized release wheels and run comprehensive tests on the resulting package.
 
@@ -147,7 +147,7 @@ This script is perfect for:
 - ✅ Validates virtual environment is activated
 - ✅ Checks for required tools (maturin, pytest)
 - ✅ Cleans previous build artifacts
-- ✅ Builds optimized release wheels (`maturin build --release`)
+- ✅ Builds optimized release wheels (`maturin build --release --out dist`)
 - ✅ Lists created wheel files with sizes
 - ✅ Installs the freshly-built wheel
 - ✅ Verifies signal-kit can be imported
@@ -159,22 +159,22 @@ This script is perfect for:
 
 **Basic usage:**
 ```bash
-./scripts/build_and_test_release.sh
+./scripts/build_and_test_python_release.sh
 ```
 
 **Custom venv:**
 ```bash
-./scripts/build_and_test_release.sh ~/my_signal_kit_env
+./scripts/build_and_test_python_release.sh ~/my_signal_kit_env
 ```
 
 **For CI/CD (skip venv check):**
 ```bash
-SKIP_VENV_CHECK=true ./scripts/build_and_test_release.sh
+SKIP_VENV_CHECK=true ./scripts/build_and_test_python_release.sh
 ```
 
 **Get help:**
 ```bash
-./scripts/build_and_test_release.sh --help
+./scripts/build_and_test_python_release.sh --help
 ```
 
 ### Process Flow
@@ -190,7 +190,7 @@ The script performs these steps in order:
    - Removes old wheels to prevent confusion
 
 3. **Wheel Building**
-   - Calls `maturin build --release` for optimized compilation
+   - Calls `maturin build --release --out dist` for optimized compilation
    - Creates wheels in `dist/` directory
 
 4. **Installation**
@@ -297,7 +297,7 @@ pip install path/to/signal_kit-0.1.0-*.whl
 
 **"Virtual environment is not activated"**
 - Activate your venv: `source .venv/bin/activate`
-- Or skip check: `SKIP_VENV_CHECK=true ./scripts/build_and_test_release.sh`
+- Or skip check: `SKIP_VENV_CHECK=true ./scripts/build_and_test_python_release.sh`
 
 **"maturin is not installed"**
 - Install: `pip install maturin`
@@ -332,7 +332,7 @@ The script is CI/CD-friendly:
   env:
     SKIP_VENV_CHECK: 'true'
   run: |
-    ./scripts/build_and_test_release.sh
+    ./scripts/build_and_test_python_release.sh
 ```
 
 ---
