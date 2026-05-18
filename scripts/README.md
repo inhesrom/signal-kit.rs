@@ -9,6 +9,18 @@ This directory contains utility scripts for setting up and working with signal-k
 | `setup_python_env.sh` | Create venv, install maturin, pytest, numpy |
 | `build_and_test_python_release.sh` | Build optimized wheels and run full test suite |
 
+## Native SIMD Rust Tests
+
+The Rust build script selects one DSP vector backend for the build CPU:
+AVX-512F, AVX2/FMA, SSE2, then scalar fallback. A binary built this way is
+intended for CPUs with the selected feature set.
+
+```bash
+cargo test
+RUSTFLAGS="-C target-cpu=native" cargo test
+SIGNAL_KIT_SIMD_BACKEND=scalar cargo test vector_simd
+```
+
 ---
 
 ## setup_python_env.sh

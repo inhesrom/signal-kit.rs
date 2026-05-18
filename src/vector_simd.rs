@@ -1,1895 +1,1491 @@
-#![allow(dead_code)]
+//! Build-time selected SIMD operations for real-time IQ blocks.
 
+use bytemuck::{cast_slice, cast_slice_mut};
 use num_complex::Complex;
-use std::ops::{Add, Sub, Mul, Div, Index, IndexMut, AddAssign, SubAssign, MulAssign, DivAssign};
-use bytemuck::{cast_slice, cast_slice_mut, Pod};
 
-// ============================================================================
-// SIMD Configuration Module - Change these type aliases to switch register width
-// ============================================================================
-
-mod simd_config {
-    /// Current configuration: 128-bit registers
-    ///
-    /// To use 256-bit registers, change:
-    /// - F32Batch from `wide::f32x4` to `wide::f32x8`
-    /// - F64Batch from `wide::f64x2` to `wide::f64x4`
-    ///
-    /// To use 512-bit registers, change to:
-    /// - F32Batch: `wide::f32x16`
-    /// - F64Batch: `wide::f64x8`
-    pub type F32Batch = wide::f32x4;  // 128-bit: 4 × f32
-    pub type F64Batch = wide::f64x2;  // 128-bit: 2 × f64
-}
-
-// ============================================================================
-// SIMD Batch Trait - Abstracts over different register widths
-// ============================================================================
-
-/// Trait for SIMD batch operations, allowing generic code over different register widths
-///
-/// # Memory Alignment
-///
-/// All load/store operations use **unaligned** instructions, which work correctly
-/// regardless of memory alignment. On modern CPUs (Intel Nehalem+ 2008, AMD Bulldozer+ 2011),
-/// unaligned loads/stores have **zero performance penalty** for aligned data.
-///
-/// This design choice provides:
-/// - **Safety**: Works with any slice, no alignment requirements
-/// - **Performance**: Equal to aligned loads on modern hardware
-/// - **Simplicity**: No need to track or enforce alignment
-///
-/// The only remaining penalty is cache-line splits (when data crosses cache boundaries),
-/// which is unavoidable and handled automatically by the CPU.
-pub trait SimdBatch: Sized + Copy {
-    type Scalar: Copy;
-
-    /// Number of lanes (elements) in this SIMD batch
-    const LANES: usize;
-
-    /// Create a batch with all lanes set to zero
-    fn zero() -> Self;
-
-    /// Create a batch with all lanes set to the same value (splat)
-    fn splat(value: Self::Scalar) -> Self;
-
-    /// Load LANES elements from a slice (works with any alignment)
-    fn load(ptr: &[Self::Scalar]) -> Self;
-
-    /// Store LANES elements to a slice (works with any alignment)
-    fn store(self, ptr: &mut [Self::Scalar]);
-
-    /// Addition
-    fn add(self, rhs: Self) -> Self;
-
-    /// Subtraction
-    fn sub(self, rhs: Self) -> Self;
-
-    /// Multiplication
-    fn mul(self, rhs: Self) -> Self;
-
-    /// Division
-    fn div(self, rhs: Self) -> Self;
-
-    /// Absolute value
-    fn abs(self) -> Self;
-
-    /// Horizontal sum (reduce all lanes to single scalar)
-    fn horizontal_sum(self) -> Self::Scalar;
-}
-
-// ============================================================================
-// SimdBatch Implementation for f32x4 (128-bit)
-// ============================================================================
-
-impl SimdBatch for wide::f32x4 {
-    type Scalar = f32;
-    const LANES: usize = 4;
-
-    #[inline]
-    fn zero() -> Self {
-        Self::ZERO
-    }
-
-    #[inline]
-    fn splat(value: f32) -> Self {
-        Self::splat(value)
-    }
-
-    #[inline]
-    fn load(ptr: &[f32]) -> Self {
-        assert!(ptr.len() >= 4, "Need at least 4 elements for f32x4");
-        Self::from(&ptr[0..4])
-    }
-
-    #[inline]
-    fn store(self, ptr: &mut [f32]) {
-        assert!(ptr.len() >= 4, "Need at least 4 elements for f32x4");
-        let arr = self.to_array();
-        ptr[0..4].copy_from_slice(&arr);
-    }
-
-    #[inline]
-    fn add(self, rhs: Self) -> Self {
-        self + rhs
-    }
-
-    #[inline]
-    fn sub(self, rhs: Self) -> Self {
-        self - rhs
-    }
-
-    #[inline]
-    fn mul(self, rhs: Self) -> Self {
-        self * rhs
-    }
-
-    #[inline]
-    fn div(self, rhs: Self) -> Self {
-        self / rhs
-    }
-
-    #[inline]
-    fn abs(self) -> Self {
-        self.abs()
-    }
-
-    #[inline]
-    fn horizontal_sum(self) -> f32 {
-        let arr = self.to_array();
-        arr[0] + arr[1] + arr[2] + arr[3]
-    }
-}
-
-// ============================================================================
-// SimdBatch Implementation for f64x2 (128-bit)
-// ============================================================================
-
-impl SimdBatch for wide::f64x2 {
-    type Scalar = f64;
-    const LANES: usize = 2;
-
-    #[inline]
-    fn zero() -> Self {
-        Self::ZERO
-    }
-
-    #[inline]
-    fn splat(value: f64) -> Self {
-        Self::splat(value)
-    }
-
-    #[inline]
-    fn load(ptr: &[f64]) -> Self {
-        assert!(ptr.len() >= 2, "Need at least 2 elements for f64x2");
-        Self::from([ptr[0], ptr[1]])
-    }
-
-    #[inline]
-    fn store(self, ptr: &mut [f64]) {
-        assert!(ptr.len() >= 2, "Need at least 2 elements for f64x2");
-        let arr = self.to_array();
-        ptr[0..2].copy_from_slice(&arr);
-    }
-
-    #[inline]
-    fn add(self, rhs: Self) -> Self {
-        self + rhs
-    }
-
-    #[inline]
-    fn sub(self, rhs: Self) -> Self {
-        self - rhs
-    }
-
-    #[inline]
-    fn mul(self, rhs: Self) -> Self {
-        self * rhs
-    }
-
-    #[inline]
-    fn div(self, rhs: Self) -> Self {
-        self / rhs
-    }
-
-    #[inline]
-    fn abs(self) -> Self {
-        self.abs()
-    }
-
-    #[inline]
-    fn horizontal_sum(self) -> f64 {
-        let arr = self.to_array();
-        arr[0] + arr[1]
-    }
-}
-
-// ============================================================================
-// VectorSimd Structure and Basic Methods
-// ============================================================================
-
-/// A SIMD-accelerated vector wrapper that provides efficient element-wise operations.
-///
-/// This struct wraps a Vec<T> and provides SIMD-optimized operations for arithmetic
-/// and signal processing operations like convolution.
-///
-/// Register width is configurable via the `simd_config` module at compile time.
-#[derive(Clone, Debug)]
-pub struct VectorSimd<T> {
-    data: Vec<T>,
-}
-
-impl<T> VectorSimd<T>
-where
-    T: Clone,
-{
-    /// Creates a new empty VectorSimd
-    pub fn new() -> Self {
-        Self { data: Vec::new() }
-    }
-
-    /// Creates a VectorSimd with a specific capacity
-    pub fn with_capacity(capacity: usize) -> Self {
-        Self {
-            data: Vec::with_capacity(capacity),
-        }
-    }
-
-    /// Creates a VectorSimd with `count` elements, all initialized to `value`
-    pub fn with_value(count: usize, value: T) -> Self {
-        Self {
-            data: vec![value; count],
-        }
-    }
-
-    /// Creates a VectorSimd from an existing Vec
-    pub fn from_vec(vec: Vec<T>) -> Self {
-        Self { data: vec }
-    }
-
-    /// Returns the number of elements in the vector
-    pub fn size(&self) -> usize {
-        self.data.len()
-    }
-
-    /// Returns the number of elements in the vector (alias for size())
-    pub fn len(&self) -> usize {
-        self.data.len()
-    }
-
-    /// Returns true if the vector is empty
-    pub fn is_empty(&self) -> bool {
-        self.data.is_empty()
-    }
-
-    /// Adds an element to the end of the vector
-    pub fn push_back(&mut self, value: T) {
-        self.data.push(value);
-    }
-
-    /// Adds an element to the end of the vector (alias for push_back)
-    pub fn push(&mut self, value: T) {
-        self.data.push(value);
-    }
-
-    /// Reserves capacity for at least `additional` more elements
-    pub fn reserve(&mut self, additional: usize) {
-        self.data.reserve(additional);
-    }
-
-    /// Appends another VectorSimd to this one
-    pub fn append(&mut self, other: &VectorSimd<T>) {
-        self.data.extend_from_slice(&other.data);
-    }
-
-    /// Returns a slice view of the underlying data
-    pub fn as_slice(&self) -> &[T] {
-        &self.data
-    }
-
-    /// Returns a mutable slice view of the underlying data
-    pub fn as_mut_slice(&mut self) -> &mut [T] {
-        &mut self.data
-    }
-
-    /// Returns a raw pointer to the underlying data
-    pub fn as_ptr(&self) -> *const T {
-        self.data.as_ptr()
-    }
-
-    /// Returns a mutable raw pointer to the underlying data
-    pub fn as_mut_ptr(&mut self) -> *mut T {
-        self.data.as_mut_ptr()
-    }
-}
-
-impl<T> Default for VectorSimd<T>
-where
-    T: Clone,
-{
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-// Index trait for element access
-impl<T> Index<usize> for VectorSimd<T> {
-    type Output = T;
-
-    fn index(&self, index: usize) -> &Self::Output {
-        &self.data[index]
-    }
-}
-
-impl<T> IndexMut<usize> for VectorSimd<T> {
-    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
-        &mut self.data[index]
-    }
-}
-
-// FromIterator to allow collecting into VectorSimd
-impl<T> FromIterator<T> for VectorSimd<T>
-where
-    T: Clone,
-{
-    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
-        Self {
-            data: iter.into_iter().collect(),
-        }
-    }
-}
-
-// ============================================================================
-// Generic SIMD Operation Framework
-// ============================================================================
-
-/// Operation types for batch processing
+/// Describes the DSP vector backend selected by the build script.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Operation {
-    Add,
-    Subtract,
-    Multiply,
-    Divide,
+pub enum SimdBackend {
+    /// Scalar fallback for non-SIMD builds and unsupported targets.
+    Scalar,
+    /// SSE2 backend using 128-bit registers.
+    Sse2,
+    /// AVX2/FMA backend using 256-bit registers.
+    Avx2Fma,
+    /// AVX-512F backend using 512-bit registers.
+    Avx512F,
 }
 
-impl<T> VectorSimd<T>
-where
-    T: Copy + Default + Pod,
-{
-    /// Generic SIMD batch processor for vector-vector operations
-    fn process_simd_batches<B>(
-        &self,
-        other: &VectorSimd<T>,
-        batch_op: impl Fn(B, B) -> B,
-        scalar_op: impl Fn(T, T) -> T,
-    ) -> VectorSimd<T>
-    where
-        B: SimdBatch<Scalar = T> + Pod,
+impl SimdBackend {
+    /// Returns the backend register width in bits.
+    pub const fn register_bits(self) -> usize {
+        match self {
+            Self::Scalar => 32,
+            Self::Sse2 => 128,
+            Self::Avx2Fma => 256,
+            Self::Avx512F => 512,
+        }
+    }
+
+    /// Returns the number of complex f32 IQ samples per vector register.
+    pub const fn iq_lanes(self) -> usize {
+        match self {
+            Self::Scalar => 1,
+            _ => self.register_bits() / 64,
+        }
+    }
+}
+
+/// A small planner exposing the selected IQ backend and lane geometry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IqVectorPlan {
+    backend: SimdBackend,
+    register_bits: usize,
+    iq_lanes: usize,
+}
+
+impl IqVectorPlan {
+    /// Builds a plan for the backend selected at compile time.
+    pub const fn selected() -> Self {
+        Self {
+            backend: SELECTED_BACKEND,
+            register_bits: REGISTER_BITS,
+            iq_lanes: IQ_LANES,
+        }
+    }
+
+    /// Returns the backend selected for this build.
+    pub const fn backend(self) -> SimdBackend {
+        self.backend
+    }
+
+    /// Returns the selected register width in bits.
+    pub const fn register_bits(self) -> usize {
+        self.register_bits
+    }
+
+    /// Returns complex f32 IQ samples processed per vector register.
+    pub const fn iq_lanes(self) -> usize {
+        self.iq_lanes
+    }
+
+    /// Writes `left + right` into `output` without allocating.
+    pub fn iq_add_to(self, left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]) {
+        iq_add_to(left, right, output);
+    }
+
+    /// Adds `input` into `target` without allocating.
+    pub fn iq_add_inplace(self, target: &mut [Complex<f32>], input: &[Complex<f32>]) {
+        iq_add_inplace(target, input);
+    }
+
+    /// Scales `target` by `scale` without allocating.
+    pub fn iq_scale_inplace(self, target: &mut [Complex<f32>], scale: f32) {
+        iq_scale_inplace(target, scale);
+    }
+
+    /// Adds `scale * input` into `target` without allocating.
+    pub fn iq_axpy_inplace(self, target: &mut [Complex<f32>], scale: Complex<f32>, input: &[Complex<f32>]) {
+        iq_axpy_inplace(target, scale, input);
+    }
+
+    /// Writes `left * right` into `output` without allocating.
+    pub fn iq_mul_to(self, left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]) {
+        iq_mul_to(left, right, output);
+    }
+
+    /// Returns the sum of per-sample IQ power values.
+    pub fn iq_power_sum(self, input: &[Complex<f32>]) -> f32 {
+        iq_power_sum(input)
+    }
+
+    /// Writes per-sample magnitudes into `output` without allocating.
+    pub fn magnitude_to(self, input: &[Complex<f32>], output: &mut [f32]) {
+        magnitude_to(input, output);
+    }
+}
+
+impl Default for IqVectorPlan {
+    fn default() -> Self {
+        Self::selected()
+    }
+}
+
+/// Backend selected by the current build.
+pub const SELECTED_BACKEND: SimdBackend = selected_backend();
+
+/// Register width selected by the current build.
+pub const REGISTER_BITS: usize = SELECTED_BACKEND.register_bits();
+
+/// Complex f32 samples processed per selected register.
+pub const IQ_LANES: usize = SELECTED_BACKEND.iq_lanes();
+
+#[cfg(signal_kit_simd_avx512)]
+type SelectedBackend = x86::Avx512Backend;
+
+#[cfg(signal_kit_simd_avx2)]
+type SelectedBackend = x86::Avx2Backend;
+
+#[cfg(signal_kit_simd_sse2)]
+type SelectedBackend = x86::Sse2Backend;
+
+#[cfg(any(signal_kit_simd_scalar, not(any(signal_kit_simd_avx512, signal_kit_simd_avx2, signal_kit_simd_sse2))))]
+type SelectedBackend = scalar::ScalarBackend;
+
+/// Returns a plan for the backend selected at compile time.
+pub const fn selected_iq_plan() -> IqVectorPlan {
+    IqVectorPlan::selected()
+}
+
+/// Writes `left + right` into `output` without allocating.
+pub fn iq_add_to(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]) {
+    assert_binary_output_len(left, right, output);
+    SelectedBackend::iq_add_to(left, right, output);
+}
+
+/// Adds `input` into `target` without allocating.
+pub fn iq_add_inplace(target: &mut [Complex<f32>], input: &[Complex<f32>]) {
+    assert_equal_len(target, input, "target", "input");
+    SelectedBackend::iq_add_inplace(target, input);
+}
+
+/// Scales `target` by `scale` without allocating.
+pub fn iq_scale_inplace(target: &mut [Complex<f32>], scale: f32) {
+    SelectedBackend::iq_scale_inplace(target, scale);
+}
+
+/// Adds `scale * input` into `target` without allocating.
+pub fn iq_axpy_inplace(target: &mut [Complex<f32>], scale: Complex<f32>, input: &[Complex<f32>]) {
+    assert_equal_len(target, input, "target", "input");
+    SelectedBackend::iq_axpy_inplace(target, scale, input);
+}
+
+/// Writes `left * right` into `output` without allocating.
+pub fn iq_mul_to(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]) {
+    assert_binary_output_len(left, right, output);
+    SelectedBackend::iq_mul_to(left, right, output);
+}
+
+/// Returns the sum of squared magnitudes for all IQ samples.
+pub fn iq_power_sum(input: &[Complex<f32>]) -> f32 {
+    SelectedBackend::iq_power_sum(input)
+}
+
+/// Writes per-sample magnitudes into `output` without allocating.
+pub fn magnitude_to(input: &[Complex<f32>], output: &mut [f32]) {
+    assert_output_len(input.len(), output.len(), "magnitude output");
+    SelectedBackend::magnitude_to(input, output);
+}
+
+/// Frequency shifts IQ blocks while preserving phase across calls.
+#[derive(Debug, Clone)]
+pub struct FrequencyShifter {
+    radians_per_sample: f32,
+    phase: f32,
+}
+
+impl FrequencyShifter {
+    /// Creates a frequency shifter from offset and sample-rate values in hertz.
+    pub fn new(freq_offset_hz: f32, sample_rate_hz: f32) -> Self {
+        assert!(sample_rate_hz > 0.0, "sample_rate_hz must be positive");
+        Self {
+            radians_per_sample: std::f32::consts::TAU * freq_offset_hz / sample_rate_hz,
+            phase: 0.0,
+        }
+    }
+
+    /// Returns the current oscillator phase in radians.
+    pub fn phase(&self) -> f32 {
+        self.phase
+    }
+
+    /// Shifts a block in place and preserves phase for the next block.
+    pub fn process_block(&mut self, samples: &mut [Complex<f32>]) {
+        let mut phase = self.phase;
+        for sample in samples {
+            *sample *= unit_complex(phase);
+            phase = wrap_phase(phase + self.radians_per_sample);
+        }
+        self.phase = phase;
+    }
+}
+
+/// Applies a complex FIR filter while preserving delay state across calls.
+#[derive(Debug, Clone)]
+pub struct FirFilter {
+    taps: Vec<Complex<f32>>,
+    delay: Vec<Complex<f32>>,
+}
+
+impl FirFilter {
+    /// Creates a streaming FIR filter with `taps[0]` applied to the current sample.
+    pub fn new(taps: Vec<Complex<f32>>) -> Self {
+        assert!(!taps.is_empty(), "taps must not be empty");
+        let delay = vec![Complex::new(0.0, 0.0); taps.len() - 1];
+        Self { taps, delay }
+    }
+
+    /// Returns the FIR tap slice.
+    pub fn taps(&self) -> &[Complex<f32>] {
+        &self.taps
+    }
+
+    /// Returns the current delay-state slice with the newest sample first.
+    pub fn delay(&self) -> &[Complex<f32>] {
+        &self.delay
+    }
+
+    /// Filters `input` into `output` without allocating.
+    pub fn process_block_to(&mut self, input: &[Complex<f32>], output: &mut [Complex<f32>]) {
+        assert_output_len(input.len(), output.len(), "fir output");
+        for (sample, output_sample) in input.iter().zip(output.iter_mut()) {
+            *output_sample = self.process_sample(*sample);
+        }
+    }
+
+    /// Filters a block in place without allocating.
+    pub fn process_block_inplace(&mut self, samples: &mut [Complex<f32>]) {
+        for sample in samples {
+            *sample = self.process_sample(*sample);
+        }
+    }
+
+    /// Filters one sample and advances the delay line.
+    pub fn process_sample(&mut self, sample: Complex<f32>) -> Complex<f32> {
+        let output = self.calculate_output(sample);
+        self.push_delay(sample);
+        output
+    }
+
+    /// Calculates the FIR output for one sample using the current delay line.
+    fn calculate_output(&self, sample: Complex<f32>) -> Complex<f32> {
+        let mut sum = self.taps[0] * sample;
+        for (tap, delayed_sample) in self.taps.iter().skip(1).zip(self.delay.iter()) {
+            sum += *tap * *delayed_sample;
+        }
+        sum
+    }
+
+    /// Pushes one sample into the delay line.
+    fn push_delay(&mut self, sample: Complex<f32>) {
+        if self.delay.is_empty() {
+            return;
+        }
+        self.delay.rotate_right(1);
+        self.delay[0] = sample;
+    }
+}
+
+trait IqBackend {
+    /// Writes `left + right` into `output`.
+    fn iq_add_to(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]);
+
+    /// Adds `input` into `target`.
+    fn iq_add_inplace(target: &mut [Complex<f32>], input: &[Complex<f32>]);
+
+    /// Scales `target` by `scale`.
+    fn iq_scale_inplace(target: &mut [Complex<f32>], scale: f32);
+
+    /// Adds `scale * input` into `target`.
+    fn iq_axpy_inplace(target: &mut [Complex<f32>], scale: Complex<f32>, input: &[Complex<f32>]);
+
+    /// Writes `left * right` into `output`.
+    fn iq_mul_to(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]);
+
+    /// Returns sum of squared magnitudes.
+    fn iq_power_sum(input: &[Complex<f32>]) -> f32;
+
+    /// Writes per-sample magnitudes into `output`.
+    fn magnitude_to(input: &[Complex<f32>], output: &mut [f32]);
+}
+
+/// Returns the build-selected backend as a const value.
+const fn selected_backend() -> SimdBackend {
+    #[cfg(signal_kit_simd_avx512)]
     {
-        assert_eq!(
-            self.len(),
-            other.len(),
-            "Vector sizes must match for element-wise operations"
-        );
-
-        // Allocate without initialization for better performance
-        let mut result = Vec::with_capacity(self.len());
-        unsafe {
-            result.set_len(self.len());
-        }
-
-        let lanes = B::LANES;
-        let simd_end = (self.len() / lanes) * lanes;
-
-        // Process SIMD batches using zero-copy cast_slice
-        let a_simd: &[B] = cast_slice(&self.data[..simd_end]);
-        let b_simd: &[B] = cast_slice(&other.data[..simd_end]);
-        let result_simd: &mut [B] = cast_slice_mut(&mut result[..simd_end]);
-
-        // Use iterator-based approach for better optimization
-        result_simd.iter_mut()
-            .zip(a_simd.iter().zip(b_simd.iter()))
-            .for_each(|(r, (a, b))| *r = batch_op(*a, *b));
-
-        // Process remainder with scalar operations
-        for i in simd_end..self.len() {
-            result[i] = scalar_op(self.data[i], other.data[i]);
-        }
-
-        VectorSimd { data: result }
+        return SimdBackend::Avx512F;
     }
-
-    /// Generic SIMD batch processor for vector-scalar operations
-    fn process_simd_batches_scalar<B>(
-        &self,
-        scalar: T,
-        batch_op: impl Fn(B, B) -> B,
-        scalar_op: impl Fn(T, T) -> T,
-    ) -> VectorSimd<T>
-    where
-        B: SimdBatch<Scalar = T> + Pod,
+    #[cfg(signal_kit_simd_avx2)]
     {
-        // Allocate without initialization for better performance
-        let mut result = Vec::with_capacity(self.len());
-        unsafe {
-            result.set_len(self.len());
-        }
-
-        let lanes = B::LANES;
-        let simd_end = (self.len() / lanes) * lanes;
-        let scalar_batch = B::splat(scalar);
-
-        // Process SIMD batches using zero-copy cast_slice
-        let a_simd: &[B] = cast_slice(&self.data[..simd_end]);
-        let result_simd: &mut [B] = cast_slice_mut(&mut result[..simd_end]);
-
-        // Use iterator-based approach for better optimization
-        result_simd.iter_mut()
-            .zip(a_simd.iter())
-            .for_each(|(r, a)| *r = batch_op(*a, scalar_batch));
-
-        // Process remainder
-        for i in simd_end..self.len() {
-            result[i] = scalar_op(self.data[i], scalar);
-        }
-
-        VectorSimd { data: result }
+        return SimdBackend::Avx2Fma;
     }
-
-    /// Generic SIMD batch processor for in-place vector-scalar operations
-    fn process_simd_batches_scalar_inplace<B>(
-        &mut self,
-        scalar: T,
-        batch_op: impl Fn(B, B) -> B,
-        scalar_op: impl Fn(T, T) -> T,
-    )
-    where
-        B: SimdBatch<Scalar = T> + Pod,
+    #[cfg(signal_kit_simd_sse2)]
     {
-        let lanes = B::LANES;
-        let simd_end = (self.len() / lanes) * lanes;
-        let scalar_batch = B::splat(scalar);
+        return SimdBackend::Sse2;
+    }
+    #[allow(unreachable_code)]
+    SimdBackend::Scalar
+}
 
-        // Process SIMD batches using zero-copy cast_slice
-        let data_simd: &mut [B] = cast_slice_mut(&mut self.data[..simd_end]);
+/// Asserts that two input slices and one output slice have matching lengths.
+fn assert_binary_output_len(left: &[Complex<f32>], right: &[Complex<f32>], output: &[Complex<f32>]) {
+    assert_equal_len(left, right, "left", "right");
+    assert_output_len(left.len(), output.len(), "output");
+}
 
-        // Use iterator-based approach for better optimization
-        data_simd.iter_mut()
-            .for_each(|d| *d = batch_op(*d, scalar_batch));
+/// Asserts that two slices have matching lengths.
+fn assert_equal_len<T, U>(left: &[T], right: &[U], left_name: &str, right_name: &str) {
+    assert_eq!(left.len(), right.len(), "{left_name} and {right_name} lengths must match");
+}
 
-        // Process remainder
-        for i in simd_end..self.len() {
-            self.data[i] = scalar_op(self.data[i], scalar);
+/// Asserts that an output length matches the expected length.
+fn assert_output_len(expected: usize, actual: usize, output_name: &str) {
+    assert_eq!(expected, actual, "{output_name} length must match input length");
+}
+
+/// Casts complex f32 samples to their interleaved f32 representation.
+fn as_f32_slice(input: &[Complex<f32>]) -> &[f32] {
+    cast_slice(input)
+}
+
+/// Casts mutable complex f32 samples to their interleaved f32 representation.
+fn as_f32_slice_mut(input: &mut [Complex<f32>]) -> &mut [f32] {
+    cast_slice_mut(input)
+}
+
+/// Returns the largest vectorized prefix length for a lane count.
+fn vectorized_end(len: usize, lanes: usize) -> usize {
+    len - (len % lanes)
+}
+
+/// Builds a unit complex value for the provided phase.
+fn unit_complex(phase: f32) -> Complex<f32> {
+    let (sin_phase, cos_phase) = phase.sin_cos();
+    Complex::new(cos_phase, sin_phase)
+}
+
+/// Wraps phase into one turn to keep oscillator state bounded.
+fn wrap_phase(phase: f32) -> f32 {
+    phase.rem_euclid(std::f32::consts::TAU)
+}
+
+mod scalar {
+    #![allow(dead_code)]
+
+    use super::*;
+
+    /// Scalar backend marker.
+    pub(super) struct ScalarBackend;
+
+    impl IqBackend for ScalarBackend {
+        fn iq_add_to(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]) {
+            iq_add_to(left, right, output);
+        }
+
+        fn iq_add_inplace(target: &mut [Complex<f32>], input: &[Complex<f32>]) {
+            iq_add_inplace(target, input);
+        }
+
+        fn iq_scale_inplace(target: &mut [Complex<f32>], scale: f32) {
+            iq_scale_inplace(target, scale);
+        }
+
+        fn iq_axpy_inplace(target: &mut [Complex<f32>], scale: Complex<f32>, input: &[Complex<f32>]) {
+            iq_axpy_inplace(target, scale, input);
+        }
+
+        fn iq_mul_to(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]) {
+            iq_mul_to(left, right, output);
+        }
+
+        fn iq_power_sum(input: &[Complex<f32>]) -> f32 {
+            iq_power_sum(input)
+        }
+
+        fn magnitude_to(input: &[Complex<f32>], output: &mut [f32]) {
+            magnitude_to(input, output);
+        }
+    }
+
+    /// Writes scalar complex additions into `output`.
+    pub(super) fn iq_add_to(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]) {
+        for ((left_sample, right_sample), output_sample) in left.iter().zip(right.iter()).zip(output.iter_mut()) {
+            *output_sample = *left_sample + *right_sample;
+        }
+    }
+
+    /// Adds scalar complex samples into `target`.
+    pub(super) fn iq_add_inplace(target: &mut [Complex<f32>], input: &[Complex<f32>]) {
+        for (target_sample, input_sample) in target.iter_mut().zip(input.iter()) {
+            *target_sample += *input_sample;
+        }
+    }
+
+    /// Scales scalar complex samples in place.
+    pub(super) fn iq_scale_inplace(target: &mut [Complex<f32>], scale: f32) {
+        for target_sample in target {
+            *target_sample *= scale;
+        }
+    }
+
+    /// Adds scalar `scale * input` products into `target`.
+    pub(super) fn iq_axpy_inplace(target: &mut [Complex<f32>], scale: Complex<f32>, input: &[Complex<f32>]) {
+        for (target_sample, input_sample) in target.iter_mut().zip(input.iter()) {
+            *target_sample += scale * *input_sample;
+        }
+    }
+
+    /// Writes scalar complex products into `output`.
+    pub(super) fn iq_mul_to(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]) {
+        for ((left_sample, right_sample), output_sample) in left.iter().zip(right.iter()).zip(output.iter_mut()) {
+            *output_sample = *left_sample * *right_sample;
+        }
+    }
+
+    /// Returns a scalar sum of squared magnitudes.
+    pub(super) fn iq_power_sum(input: &[Complex<f32>]) -> f32 {
+        input.iter().map(|sample| sample.norm_sqr()).sum()
+    }
+
+    /// Writes scalar magnitudes into `output`.
+    pub(super) fn magnitude_to(input: &[Complex<f32>], output: &mut [f32]) {
+        for (sample, output_sample) in input.iter().zip(output.iter_mut()) {
+            *output_sample = sample.norm();
+        }
+    }
+
+    /// Writes scalar f32 additions from `start` to the end.
+    pub(super) fn add_f32_tail(left: &[f32], right: &[f32], output: &mut [f32], start: usize) {
+        for index in start..left.len() {
+            output[index] = left[index] + right[index];
+        }
+    }
+
+    /// Adds scalar f32 samples into `target` from `start` to the end.
+    pub(super) fn add_assign_f32_tail(target: &mut [f32], input: &[f32], start: usize) {
+        for index in start..target.len() {
+            target[index] += input[index];
+        }
+    }
+
+    /// Scales scalar f32 samples from `start` to the end.
+    pub(super) fn scale_f32_tail(target: &mut [f32], scale: f32, start: usize) {
+        for value in target.iter_mut().skip(start) {
+            *value *= scale;
+        }
+    }
+
+    /// Adds scalar complex AXPY results from `start` to the end.
+    pub(super) fn axpy_tail(target: &mut [Complex<f32>], scale: Complex<f32>, input: &[Complex<f32>], start: usize) {
+        for index in start..target.len() {
+            target[index] += scale * input[index];
+        }
+    }
+
+    /// Writes scalar complex products from `start` to the end.
+    pub(super) fn mul_tail(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>], start: usize) {
+        for index in start..left.len() {
+            output[index] = left[index] * right[index];
+        }
+    }
+
+    /// Returns a scalar f32 power tail sum from `start` to the end.
+    pub(super) fn power_f32_tail(input: &[f32], start: usize) -> f32 {
+        input.iter().skip(start).map(|value| value * value).sum()
+    }
+
+    /// Writes scalar magnitudes from `start` to the end.
+    pub(super) fn magnitude_tail(input: &[Complex<f32>], output: &mut [f32], start: usize) {
+        for index in start..input.len() {
+            output[index] = input[index].norm();
         }
     }
 }
 
-// ============================================================================
-// f32 SIMD Operations
-// ============================================================================
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+mod x86 {
+    #![allow(dead_code)]
 
-impl VectorSimd<f32> {
-    /// Creates a VectorSimd with evenly spaced values (linspace)
-    pub fn linspace(start: f32, stop: f32, length: usize) -> Self {
-        if length == 0 {
-            return Self::new();
-        }
-        if length == 1 {
-            return Self::from_vec(vec![start]);
-        }
+    use super::*;
 
-        let step = (stop - start) / (length as f32 - 1.0);
-        let data: Vec<f32> = (0..length)
-            .map(|i| start + (i as f32) * step)
-            .collect();
-        Self { data }
-    }
-}
+    #[cfg(target_arch = "x86")]
+    use std::arch::x86::*;
 
-// Implement Add trait for VectorSimd<f32>
-impl Add for VectorSimd<f32> {
-    type Output = VectorSimd<f32>;
+    #[cfg(target_arch = "x86_64")]
+    use std::arch::x86_64::*;
 
-    fn add(self, rhs: Self) -> Self::Output {
-        use simd_config::F32Batch;
-        self.process_simd_batches::<F32Batch>(
-            &rhs,
-            |a, b| SimdBatch::add(a, b),
-            |a, b| a + b,
-        )
-    }
-}
+    const SSE_F32_LANES: usize = 4;
+    const AVX2_F32_LANES: usize = 8;
+    const AVX512_F32_LANES: usize = 16;
+    const SSE_COMPLEX_LANES: usize = 2;
+    const AVX2_COMPLEX_LANES: usize = 4;
+    const AVX512_COMPLEX_LANES: usize = 8;
+    const SSE_SIGN: [f32; SSE_F32_LANES] = [-1.0, 1.0, -1.0, 1.0];
+    const AVX2_SIGN: [f32; AVX2_F32_LANES] = [-1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0];
+    const AVX512_SIGN: [f32; AVX512_F32_LANES] = [-1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0];
 
-impl Add for &VectorSimd<f32> {
-    type Output = VectorSimd<f32>;
+    /// SSE2 backend marker.
+    pub(super) struct Sse2Backend;
 
-    fn add(self, rhs: Self) -> Self::Output {
-        use simd_config::F32Batch;
-        self.process_simd_batches::<F32Batch>(
-            rhs,
-            |a, b| SimdBatch::add(a, b),
-            |a, b| a + b,
-        )
-    }
-}
+    /// AVX2/FMA backend marker.
+    pub(super) struct Avx2Backend;
 
-// Implement Sub trait for VectorSimd<f32>
-impl Sub for VectorSimd<f32> {
-    type Output = VectorSimd<f32>;
+    /// AVX-512F backend marker.
+    pub(super) struct Avx512Backend;
 
-    fn sub(self, rhs: Self) -> Self::Output {
-        use simd_config::F32Batch;
-        self.process_simd_batches::<F32Batch>(
-            &rhs,
-            |a, b| SimdBatch::sub(a, b),
-            |a, b| a - b,
-        )
-    }
-}
-
-impl Sub for &VectorSimd<f32> {
-    type Output = VectorSimd<f32>;
-
-    fn sub(self, rhs: Self) -> Self::Output {
-        use simd_config::F32Batch;
-        self.process_simd_batches::<F32Batch>(
-            rhs,
-            |a, b| SimdBatch::sub(a, b),
-            |a, b| a - b,
-        )
-    }
-}
-
-// Implement Mul trait for VectorSimd<f32>
-impl Mul for VectorSimd<f32> {
-    type Output = VectorSimd<f32>;
-
-    fn mul(self, rhs: Self) -> Self::Output {
-        use simd_config::F32Batch;
-        self.process_simd_batches::<F32Batch>(
-            &rhs,
-            |a, b| SimdBatch::mul(a, b),
-            |a, b| a * b,
-        )
-    }
-}
-
-impl Mul for &VectorSimd<f32> {
-    type Output = VectorSimd<f32>;
-
-    fn mul(self, rhs: Self) -> Self::Output {
-        use simd_config::F32Batch;
-        self.process_simd_batches::<F32Batch>(
-            rhs,
-            |a, b| SimdBatch::mul(a, b),
-            |a, b| a * b,
-        )
-    }
-}
-
-// Implement Div trait for VectorSimd<f32>
-impl Div for VectorSimd<f32> {
-    type Output = VectorSimd<f32>;
-
-    fn div(self, rhs: Self) -> Self::Output {
-        use simd_config::F32Batch;
-        self.process_simd_batches::<F32Batch>(
-            &rhs,
-            |a, b| SimdBatch::div(a, b),
-            |a, b| a / b,
-        )
-    }
-}
-
-impl Div for &VectorSimd<f32> {
-    type Output = VectorSimd<f32>;
-
-    fn div(self, rhs: Self) -> Self::Output {
-        use simd_config::F32Batch;
-        self.process_simd_batches::<F32Batch>(
-            rhs,
-            |a, b| SimdBatch::div(a, b),
-            |a, b| a / b,
-        )
-    }
-}
-
-// Scalar operations for f32
-impl Add<f32> for VectorSimd<f32> {
-    type Output = VectorSimd<f32>;
-
-    fn add(self, rhs: f32) -> Self::Output {
-        use simd_config::F32Batch;
-        self.process_simd_batches_scalar::<F32Batch>(
-            rhs,
-            |a, b| SimdBatch::add(a, b),
-            |a, b| a + b,
-        )
-    }
-}
-
-impl Add<f32> for &VectorSimd<f32> {
-    type Output = VectorSimd<f32>;
-
-    fn add(self, rhs: f32) -> Self::Output {
-        use simd_config::F32Batch;
-        self.process_simd_batches_scalar::<F32Batch>(
-            rhs,
-            |a, b| SimdBatch::add(a, b),
-            |a, b| a + b,
-        )
-    }
-}
-
-impl Sub<f32> for VectorSimd<f32> {
-    type Output = VectorSimd<f32>;
-
-    fn sub(self, rhs: f32) -> Self::Output {
-        use simd_config::F32Batch;
-        self.process_simd_batches_scalar::<F32Batch>(
-            rhs,
-            |a, b| SimdBatch::sub(a, b),
-            |a, b| a - b,
-        )
-    }
-}
-
-impl Sub<f32> for &VectorSimd<f32> {
-    type Output = VectorSimd<f32>;
-
-    fn sub(self, rhs: f32) -> Self::Output {
-        use simd_config::F32Batch;
-        self.process_simd_batches_scalar::<F32Batch>(
-            rhs,
-            |a, b| SimdBatch::sub(a, b),
-            |a, b| a - b,
-        )
-    }
-}
-
-impl Mul<f32> for VectorSimd<f32> {
-    type Output = VectorSimd<f32>;
-
-    fn mul(self, rhs: f32) -> Self::Output {
-        use simd_config::F32Batch;
-        self.process_simd_batches_scalar::<F32Batch>(
-            rhs,
-            |a, b| SimdBatch::mul(a, b),
-            |a, b| a * b,
-        )
-    }
-}
-
-impl Mul<f32> for &VectorSimd<f32> {
-    type Output = VectorSimd<f32>;
-
-    fn mul(self, rhs: f32) -> Self::Output {
-        use simd_config::F32Batch;
-        self.process_simd_batches_scalar::<F32Batch>(
-            rhs,
-            |a, b| SimdBatch::mul(a, b),
-            |a, b| a * b,
-        )
-    }
-}
-
-impl Div<f32> for VectorSimd<f32> {
-    type Output = VectorSimd<f32>;
-
-    fn div(self, rhs: f32) -> Self::Output {
-        use simd_config::F32Batch;
-        self.process_simd_batches_scalar::<F32Batch>(
-            rhs,
-            |a, b| SimdBatch::div(a, b),
-            |a, b| a / b,
-        )
-    }
-}
-
-impl Div<f32> for &VectorSimd<f32> {
-    type Output = VectorSimd<f32>;
-
-    fn div(self, rhs: f32) -> Self::Output {
-        use simd_config::F32Batch;
-        self.process_simd_batches_scalar::<F32Batch>(
-            rhs,
-            |a, b| SimdBatch::div(a, b),
-            |a, b| a / b,
-        )
-    }
-}
-
-// Compound assignment operations for f32
-impl AddAssign<f32> for VectorSimd<f32> {
-    fn add_assign(&mut self, rhs: f32) {
-        use simd_config::F32Batch;
-        self.process_simd_batches_scalar_inplace::<F32Batch>(
-            rhs,
-            |a, b| SimdBatch::add(a, b),
-            |a, b| a + b,
-        );
-    }
-}
-
-impl SubAssign<f32> for VectorSimd<f32> {
-    fn sub_assign(&mut self, rhs: f32) {
-        use simd_config::F32Batch;
-        self.process_simd_batches_scalar_inplace::<F32Batch>(
-            rhs,
-            |a, b| SimdBatch::sub(a, b),
-            |a, b| a - b,
-        );
-    }
-}
-
-impl MulAssign<f32> for VectorSimd<f32> {
-    fn mul_assign(&mut self, rhs: f32) {
-        use simd_config::F32Batch;
-        self.process_simd_batches_scalar_inplace::<F32Batch>(
-            rhs,
-            |a, b| SimdBatch::mul(a, b),
-            |a, b| a * b,
-        );
-    }
-}
-
-impl DivAssign<f32> for VectorSimd<f32> {
-    fn div_assign(&mut self, rhs: f32) {
-        use simd_config::F32Batch;
-        self.process_simd_batches_scalar_inplace::<F32Batch>(
-            rhs,
-            |a, b| SimdBatch::div(a, b),
-            |a, b| a / b,
-        );
-    }
-}
-
-// Special operations for f32
-impl VectorSimd<f32> {
-    /// Returns absolute values of all elements
-    pub fn abs(&self) -> VectorSimd<f32> {
-        use simd_config::F32Batch;
-
-        // Allocate without initialization for better performance
-        let mut result = Vec::with_capacity(self.len());
-        unsafe {
-            result.set_len(self.len());
+    impl IqBackend for Sse2Backend {
+        fn iq_add_to(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]) {
+            unsafe { sse2_iq_add_to(left, right, output) };
         }
 
-        let lanes = F32Batch::LANES;
-        let simd_end = (self.len() / lanes) * lanes;
-
-        // Process SIMD batches using zero-copy cast_slice
-        let a_simd: &[F32Batch] = cast_slice(&self.data[..simd_end]);
-        let result_simd: &mut [F32Batch] = cast_slice_mut(&mut result[..simd_end]);
-
-        // Use iterator-based approach for better optimization
-        result_simd.iter_mut()
-            .zip(a_simd.iter())
-            .for_each(|(r, a)| *r = a.abs());
-
-        // Process remainder
-        for i in simd_end..self.len() {
-            result[i] = self.data[i].abs();
+        fn iq_add_inplace(target: &mut [Complex<f32>], input: &[Complex<f32>]) {
+            unsafe { sse2_iq_add_inplace(target, input) };
         }
 
-        VectorSimd { data: result }
+        fn iq_scale_inplace(target: &mut [Complex<f32>], scale: f32) {
+            unsafe { sse2_iq_scale_inplace(target, scale) };
+        }
+
+        fn iq_axpy_inplace(target: &mut [Complex<f32>], scale: Complex<f32>, input: &[Complex<f32>]) {
+            unsafe { sse2_iq_axpy_inplace(target, scale, input) };
+        }
+
+        fn iq_mul_to(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]) {
+            unsafe { sse2_iq_mul_to(left, right, output) };
+        }
+
+        fn iq_power_sum(input: &[Complex<f32>]) -> f32 {
+            unsafe { sse2_iq_power_sum(input) }
+        }
+
+        fn magnitude_to(input: &[Complex<f32>], output: &mut [f32]) {
+            unsafe { sse2_magnitude_to(input, output) };
+        }
     }
 
-    /// Simple convolution (direct method)
-    pub fn convolve_simple(&self, kernel: &VectorSimd<f32>) -> VectorSimd<f32> {
-        if kernel.size() > self.size() {
-            return VectorSimd::new();
+    impl IqBackend for Avx2Backend {
+        fn iq_add_to(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]) {
+            unsafe { avx2_iq_add_to(left, right, output) };
         }
 
-        let output_size = self.size() - kernel.size() + 1;
-        let mut result = vec![0.0f32; output_size];
-
-        for i in 0..output_size {
-            let mut sum = 0.0f32;
-            for j in 0..kernel.size() {
-                sum += self.data[i + j] * kernel.data[j];
-            }
-            result[i] = sum;
+        fn iq_add_inplace(target: &mut [Complex<f32>], input: &[Complex<f32>]) {
+            unsafe { avx2_iq_add_inplace(target, input) };
         }
 
-        VectorSimd { data: result }
+        fn iq_scale_inplace(target: &mut [Complex<f32>], scale: f32) {
+            unsafe { avx2_iq_scale_inplace(target, scale) };
+        }
+
+        fn iq_axpy_inplace(target: &mut [Complex<f32>], scale: Complex<f32>, input: &[Complex<f32>]) {
+            unsafe { avx2_iq_axpy_inplace(target, scale, input) };
+        }
+
+        fn iq_mul_to(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]) {
+            unsafe { avx2_iq_mul_to(left, right, output) };
+        }
+
+        fn iq_power_sum(input: &[Complex<f32>]) -> f32 {
+            unsafe { avx2_iq_power_sum(input) }
+        }
+
+        fn magnitude_to(input: &[Complex<f32>], output: &mut [f32]) {
+            unsafe { avx2_magnitude_to(input, output) };
+        }
     }
 
-    /// SIMD-optimized convolution
-    pub fn convolve(&self, kernel: &VectorSimd<f32>) -> VectorSimd<f32> {
-        if kernel.size() > self.size() {
-            return VectorSimd::new();
+    impl IqBackend for Avx512Backend {
+        fn iq_add_to(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]) {
+            unsafe { avx512_iq_add_to(left, right, output) };
         }
 
-        use simd_config::F32Batch;
-        const LANES: usize = 4; // f32x4
-
-        let output_size = self.size() - kernel.size() + 1;
-        let mut result = vec![0.0f32; output_size];
-
-        let simd_chunks = output_size / LANES;
-
-        // Process LANES output samples at a time
-        for chunk_idx in 0..simd_chunks {
-            let base_idx = chunk_idx * LANES;
-            let mut accum = F32Batch::zero();
-
-            // For each kernel tap (using load since base_idx + k may not be aligned)
-            for k in 0..kernel.size() {
-                let sig = F32Batch::load(&self.data[base_idx + k..]);
-                let kern = F32Batch::splat(kernel.data[k]);
-                accum = SimdBatch::add(accum, SimdBatch::mul(sig, kern));
-            }
-
-            // Use cast_slice_mut for zero-copy store (base_idx is always aligned to LANES)
-            let result_simd: &mut [F32Batch] = cast_slice_mut(&mut result[base_idx..base_idx + LANES]);
-            result_simd[0] = accum;
+        fn iq_add_inplace(target: &mut [Complex<f32>], input: &[Complex<f32>]) {
+            unsafe { avx512_iq_add_inplace(target, input) };
         }
 
-        // Handle remaining elements
-        for i in (simd_chunks * LANES)..output_size {
-            let mut sum = 0.0f32;
-            for j in 0..kernel.size() {
-                sum += self.data[i + j] * kernel.data[j];
-            }
-            result[i] = sum;
+        fn iq_scale_inplace(target: &mut [Complex<f32>], scale: f32) {
+            unsafe { avx512_iq_scale_inplace(target, scale) };
         }
 
-        VectorSimd { data: result }
+        fn iq_axpy_inplace(target: &mut [Complex<f32>], scale: Complex<f32>, input: &[Complex<f32>]) {
+            unsafe { avx512_iq_axpy_inplace(target, scale, input) };
+        }
+
+        fn iq_mul_to(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]) {
+            unsafe { avx512_iq_mul_to(left, right, output) };
+        }
+
+        fn iq_power_sum(input: &[Complex<f32>]) -> f32 {
+            unsafe { avx512_iq_power_sum(input) }
+        }
+
+        fn magnitude_to(input: &[Complex<f32>], output: &mut [f32]) {
+            unsafe { avx512_magnitude_to(input, output) };
+        }
+    }
+
+    /// Writes SSE2 f32 additions into `output`.
+    #[target_feature(enable = "sse2")]
+    unsafe fn sse2_iq_add_to(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]) {
+        let end = unsafe { add_f32_vectors(as_f32_slice(left), as_f32_slice(right), as_f32_slice_mut(output)) };
+        scalar::add_f32_tail(as_f32_slice(left), as_f32_slice(right), as_f32_slice_mut(output), end);
+    }
+
+    /// Adds SSE2 f32 samples into `target`.
+    #[target_feature(enable = "sse2")]
+    unsafe fn sse2_iq_add_inplace(target: &mut [Complex<f32>], input: &[Complex<f32>]) {
+        let end = unsafe { add_assign_f32_vectors(as_f32_slice_mut(target), as_f32_slice(input)) };
+        scalar::add_assign_f32_tail(as_f32_slice_mut(target), as_f32_slice(input), end);
+    }
+
+    /// Scales SSE2 f32 samples in place.
+    #[target_feature(enable = "sse2")]
+    unsafe fn sse2_iq_scale_inplace(target: &mut [Complex<f32>], scale: f32) {
+        let end = unsafe { scale_f32_vectors(as_f32_slice_mut(target), scale) };
+        scalar::scale_f32_tail(as_f32_slice_mut(target), scale, end);
+    }
+
+    /// Adds SSE2 complex AXPY results into `target`.
+    #[target_feature(enable = "sse2")]
+    unsafe fn sse2_iq_axpy_inplace(target: &mut [Complex<f32>], scale: Complex<f32>, input: &[Complex<f32>]) {
+        let end = unsafe { sse2_axpy_vectors(target, scale, input) };
+        scalar::axpy_tail(target, scale, input, end);
+    }
+
+    /// Writes SSE2 complex products into `output`.
+    #[target_feature(enable = "sse2")]
+    unsafe fn sse2_iq_mul_to(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]) {
+        let end = unsafe { sse2_mul_vectors(left, right, output) };
+        scalar::mul_tail(left, right, output, end);
+    }
+
+    /// Returns an SSE2 sum of squared magnitudes.
+    #[target_feature(enable = "sse2")]
+    unsafe fn sse2_iq_power_sum(input: &[Complex<f32>]) -> f32 {
+        let (end, sum) = unsafe { power_sum_f32_vectors(as_f32_slice(input)) };
+        sum + scalar::power_f32_tail(as_f32_slice(input), end)
+    }
+
+    /// Writes SSE2 magnitudes into `output`.
+    #[target_feature(enable = "sse2")]
+    unsafe fn sse2_magnitude_to(input: &[Complex<f32>], output: &mut [f32]) {
+        let end = unsafe { sse2_magnitude_vectors(input, output) };
+        scalar::magnitude_tail(input, output, end);
+    }
+
+    /// Writes AVX2 f32 additions into `output`.
+    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "fma")]
+    unsafe fn avx2_iq_add_to(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]) {
+        let end = unsafe { avx2_add_f32_vectors(as_f32_slice(left), as_f32_slice(right), as_f32_slice_mut(output)) };
+        scalar::add_f32_tail(as_f32_slice(left), as_f32_slice(right), as_f32_slice_mut(output), end);
+    }
+
+    /// Adds AVX2 f32 samples into `target`.
+    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "fma")]
+    unsafe fn avx2_iq_add_inplace(target: &mut [Complex<f32>], input: &[Complex<f32>]) {
+        let end = unsafe { avx2_add_assign_f32_vectors(as_f32_slice_mut(target), as_f32_slice(input)) };
+        scalar::add_assign_f32_tail(as_f32_slice_mut(target), as_f32_slice(input), end);
+    }
+
+    /// Scales AVX2 f32 samples in place.
+    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "fma")]
+    unsafe fn avx2_iq_scale_inplace(target: &mut [Complex<f32>], scale: f32) {
+        let end = unsafe { avx2_scale_f32_vectors(as_f32_slice_mut(target), scale) };
+        scalar::scale_f32_tail(as_f32_slice_mut(target), scale, end);
+    }
+
+    /// Adds AVX2 complex AXPY results into `target`.
+    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "fma")]
+    unsafe fn avx2_iq_axpy_inplace(target: &mut [Complex<f32>], scale: Complex<f32>, input: &[Complex<f32>]) {
+        let end = unsafe { avx2_axpy_vectors(target, scale, input) };
+        scalar::axpy_tail(target, scale, input, end);
+    }
+
+    /// Writes AVX2 complex products into `output`.
+    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "fma")]
+    unsafe fn avx2_iq_mul_to(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]) {
+        let end = unsafe { avx2_mul_vectors(left, right, output) };
+        scalar::mul_tail(left, right, output, end);
+    }
+
+    /// Returns an AVX2 sum of squared magnitudes.
+    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "fma")]
+    unsafe fn avx2_iq_power_sum(input: &[Complex<f32>]) -> f32 {
+        let (end, sum) = unsafe { avx2_power_sum_f32_vectors(as_f32_slice(input)) };
+        sum + scalar::power_f32_tail(as_f32_slice(input), end)
+    }
+
+    /// Writes AVX2 magnitudes into `output`.
+    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "fma")]
+    unsafe fn avx2_magnitude_to(input: &[Complex<f32>], output: &mut [f32]) {
+        let end = unsafe { avx2_magnitude_vectors(input, output) };
+        scalar::magnitude_tail(input, output, end);
+    }
+
+    /// Writes AVX-512 f32 additions into `output`.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_iq_add_to(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]) {
+        let end = unsafe { avx512_add_f32_vectors(as_f32_slice(left), as_f32_slice(right), as_f32_slice_mut(output)) };
+        scalar::add_f32_tail(as_f32_slice(left), as_f32_slice(right), as_f32_slice_mut(output), end);
+    }
+
+    /// Adds AVX-512 f32 samples into `target`.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_iq_add_inplace(target: &mut [Complex<f32>], input: &[Complex<f32>]) {
+        let end = unsafe { avx512_add_assign_f32_vectors(as_f32_slice_mut(target), as_f32_slice(input)) };
+        scalar::add_assign_f32_tail(as_f32_slice_mut(target), as_f32_slice(input), end);
+    }
+
+    /// Scales AVX-512 f32 samples in place.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_iq_scale_inplace(target: &mut [Complex<f32>], scale: f32) {
+        let end = unsafe { avx512_scale_f32_vectors(as_f32_slice_mut(target), scale) };
+        scalar::scale_f32_tail(as_f32_slice_mut(target), scale, end);
+    }
+
+    /// Adds AVX-512 complex AXPY results into `target`.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_iq_axpy_inplace(target: &mut [Complex<f32>], scale: Complex<f32>, input: &[Complex<f32>]) {
+        let end = unsafe { avx512_axpy_vectors(target, scale, input) };
+        scalar::axpy_tail(target, scale, input, end);
+    }
+
+    /// Writes AVX-512 complex products into `output`.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_iq_mul_to(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]) {
+        let end = unsafe { avx512_mul_vectors(left, right, output) };
+        scalar::mul_tail(left, right, output, end);
+    }
+
+    /// Returns an AVX-512 sum of squared magnitudes.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_iq_power_sum(input: &[Complex<f32>]) -> f32 {
+        let (end, sum) = unsafe { avx512_power_sum_f32_vectors(as_f32_slice(input)) };
+        sum + scalar::power_f32_tail(as_f32_slice(input), end)
+    }
+
+    /// Writes AVX-512 magnitudes into `output`.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_magnitude_to(input: &[Complex<f32>], output: &mut [f32]) {
+        let end = unsafe { avx512_magnitude_vectors(input, output) };
+        scalar::magnitude_tail(input, output, end);
+    }
+
+    /// Writes SSE2 f32 additions and returns the processed prefix length.
+    #[target_feature(enable = "sse2")]
+    unsafe fn add_f32_vectors(left: &[f32], right: &[f32], output: &mut [f32]) -> usize {
+        let end = vectorized_end(left.len(), SSE_F32_LANES);
+        let mut index = 0;
+        while index < end {
+            let sum = unsafe { _mm_add_ps(load_sse(left, index), load_sse(right, index)) };
+            unsafe { _mm_storeu_ps(output.as_mut_ptr().add(index), sum) };
+            index += SSE_F32_LANES;
+        }
+        end
+    }
+
+    /// Adds SSE2 f32 samples and returns the processed prefix length.
+    #[target_feature(enable = "sse2")]
+    unsafe fn add_assign_f32_vectors(target: &mut [f32], input: &[f32]) -> usize {
+        let end = vectorized_end(target.len(), SSE_F32_LANES);
+        let mut index = 0;
+        while index < end {
+            let sum = unsafe { _mm_add_ps(load_sse(target, index), load_sse(input, index)) };
+            unsafe { _mm_storeu_ps(target.as_mut_ptr().add(index), sum) };
+            index += SSE_F32_LANES;
+        }
+        end
+    }
+
+    /// Scales SSE2 f32 samples and returns the processed prefix length.
+    #[target_feature(enable = "sse2")]
+    unsafe fn scale_f32_vectors(target: &mut [f32], scale: f32) -> usize {
+        let end = vectorized_end(target.len(), SSE_F32_LANES);
+        let scale_vector = _mm_set1_ps(scale);
+        let mut index = 0;
+        while index < end {
+            let product = unsafe { _mm_mul_ps(load_sse(target, index), scale_vector) };
+            unsafe { _mm_storeu_ps(target.as_mut_ptr().add(index), product) };
+            index += SSE_F32_LANES;
+        }
+        end
+    }
+
+    /// Adds SSE2 complex AXPY values and returns processed complex samples.
+    #[target_feature(enable = "sse2")]
+    unsafe fn sse2_axpy_vectors(target: &mut [Complex<f32>], scale: Complex<f32>, input: &[Complex<f32>]) -> usize {
+        let end = vectorized_end(input.len(), SSE_COMPLEX_LANES);
+        let scale_re = _mm_set1_ps(scale.re);
+        let scale_im = unsafe { _mm_mul_ps(_mm_set1_ps(scale.im), load_sse_sign()) };
+        let mut index = 0;
+        while index < end {
+            unsafe { store_sse_axpy(target, input, index, scale_re, scale_im) };
+            index += SSE_COMPLEX_LANES;
+        }
+        end
+    }
+
+    /// Writes SSE2 complex products and returns processed complex samples.
+    #[target_feature(enable = "sse2")]
+    unsafe fn sse2_mul_vectors(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]) -> usize {
+        let end = vectorized_end(left.len(), SSE_COMPLEX_LANES);
+        let sign = unsafe { load_sse_sign() };
+        let mut index = 0;
+        while index < end {
+            unsafe { store_sse_mul(left, right, output, index, sign) };
+            index += SSE_COMPLEX_LANES;
+        }
+        end
+    }
+
+    /// Returns the SSE2 f32 square sum and processed prefix length.
+    #[target_feature(enable = "sse2")]
+    unsafe fn power_sum_f32_vectors(input: &[f32]) -> (usize, f32) {
+        let end = vectorized_end(input.len(), SSE_F32_LANES);
+        let mut accum = _mm_setzero_ps();
+        let mut index = 0;
+        while index < end {
+            let values = unsafe { load_sse(input, index) };
+            accum = _mm_add_ps(accum, _mm_mul_ps(values, values));
+            index += SSE_F32_LANES;
+        }
+        (end, unsafe { horizontal_sum_sse(accum) })
+    }
+
+    /// Writes SSE2 magnitudes and returns processed complex samples.
+    #[target_feature(enable = "sse2")]
+    unsafe fn sse2_magnitude_vectors(input: &[Complex<f32>], output: &mut [f32]) -> usize {
+        let end = vectorized_end(input.len(), SSE_COMPLEX_LANES);
+        let input_f32 = as_f32_slice(input);
+        let mut index = 0;
+        while index < end {
+            let magnitudes = unsafe { sse2_magnitudes(input_f32, index) };
+            output[index..index + SSE_COMPLEX_LANES].copy_from_slice(&magnitudes);
+            index += SSE_COMPLEX_LANES;
+        }
+        end
+    }
+
+    /// Writes AVX2 f32 additions and returns the processed prefix length.
+    #[target_feature(enable = "avx2")]
+    unsafe fn avx2_add_f32_vectors(left: &[f32], right: &[f32], output: &mut [f32]) -> usize {
+        let end = vectorized_end(left.len(), AVX2_F32_LANES);
+        let mut index = 0;
+        while index < end {
+            let sum = unsafe { _mm256_add_ps(load_avx2(left, index), load_avx2(right, index)) };
+            unsafe { _mm256_storeu_ps(output.as_mut_ptr().add(index), sum) };
+            index += AVX2_F32_LANES;
+        }
+        end
+    }
+
+    /// Adds AVX2 f32 samples and returns the processed prefix length.
+    #[target_feature(enable = "avx2")]
+    unsafe fn avx2_add_assign_f32_vectors(target: &mut [f32], input: &[f32]) -> usize {
+        let end = vectorized_end(target.len(), AVX2_F32_LANES);
+        let mut index = 0;
+        while index < end {
+            let sum = unsafe { _mm256_add_ps(load_avx2(target, index), load_avx2(input, index)) };
+            unsafe { _mm256_storeu_ps(target.as_mut_ptr().add(index), sum) };
+            index += AVX2_F32_LANES;
+        }
+        end
+    }
+
+    /// Scales AVX2 f32 samples and returns the processed prefix length.
+    #[target_feature(enable = "avx2")]
+    unsafe fn avx2_scale_f32_vectors(target: &mut [f32], scale: f32) -> usize {
+        let end = vectorized_end(target.len(), AVX2_F32_LANES);
+        let scale_vector = _mm256_set1_ps(scale);
+        let mut index = 0;
+        while index < end {
+            let product = unsafe { _mm256_mul_ps(load_avx2(target, index), scale_vector) };
+            unsafe { _mm256_storeu_ps(target.as_mut_ptr().add(index), product) };
+            index += AVX2_F32_LANES;
+        }
+        end
+    }
+
+    /// Adds AVX2 complex AXPY values and returns processed complex samples.
+    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "fma")]
+    unsafe fn avx2_axpy_vectors(target: &mut [Complex<f32>], scale: Complex<f32>, input: &[Complex<f32>]) -> usize {
+        let end = vectorized_end(input.len(), AVX2_COMPLEX_LANES);
+        let scale_re = _mm256_set1_ps(scale.re);
+        let scale_im = unsafe { _mm256_mul_ps(_mm256_set1_ps(scale.im), load_avx2_sign()) };
+        let mut index = 0;
+        while index < end {
+            unsafe { store_avx2_axpy(target, input, index, scale_re, scale_im) };
+            index += AVX2_COMPLEX_LANES;
+        }
+        end
+    }
+
+    /// Writes AVX2 complex products and returns processed complex samples.
+    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "fma")]
+    unsafe fn avx2_mul_vectors(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]) -> usize {
+        let end = vectorized_end(left.len(), AVX2_COMPLEX_LANES);
+        let sign = unsafe { load_avx2_sign() };
+        let mut index = 0;
+        while index < end {
+            unsafe { store_avx2_mul(left, right, output, index, sign) };
+            index += AVX2_COMPLEX_LANES;
+        }
+        end
+    }
+
+    /// Returns the AVX2 f32 square sum and processed prefix length.
+    #[target_feature(enable = "avx2")]
+    unsafe fn avx2_power_sum_f32_vectors(input: &[f32]) -> (usize, f32) {
+        let end = vectorized_end(input.len(), AVX2_F32_LANES);
+        let mut accum = _mm256_setzero_ps();
+        let mut index = 0;
+        while index < end {
+            let values = unsafe { load_avx2(input, index) };
+            accum = _mm256_add_ps(accum, _mm256_mul_ps(values, values));
+            index += AVX2_F32_LANES;
+        }
+        (end, unsafe { horizontal_sum_avx2(accum) })
+    }
+
+    /// Writes AVX2 magnitudes and returns processed complex samples.
+    #[target_feature(enable = "avx2")]
+    unsafe fn avx2_magnitude_vectors(input: &[Complex<f32>], output: &mut [f32]) -> usize {
+        let end = vectorized_end(input.len(), AVX2_COMPLEX_LANES);
+        let input_f32 = as_f32_slice(input);
+        let mut index = 0;
+        while index < end {
+            let magnitudes = unsafe { avx2_magnitudes(input_f32, index) };
+            output[index..index + AVX2_COMPLEX_LANES].copy_from_slice(&magnitudes);
+            index += AVX2_COMPLEX_LANES;
+        }
+        end
+    }
+
+    /// Writes AVX-512 f32 additions and returns the processed prefix length.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_add_f32_vectors(left: &[f32], right: &[f32], output: &mut [f32]) -> usize {
+        let end = vectorized_end(left.len(), AVX512_F32_LANES);
+        let mut index = 0;
+        while index < end {
+            let sum = unsafe { _mm512_add_ps(load_avx512(left, index), load_avx512(right, index)) };
+            unsafe { _mm512_storeu_ps(output.as_mut_ptr().add(index), sum) };
+            index += AVX512_F32_LANES;
+        }
+        end
+    }
+
+    /// Adds AVX-512 f32 samples and returns the processed prefix length.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_add_assign_f32_vectors(target: &mut [f32], input: &[f32]) -> usize {
+        let end = vectorized_end(target.len(), AVX512_F32_LANES);
+        let mut index = 0;
+        while index < end {
+            let sum = unsafe { _mm512_add_ps(load_avx512(target, index), load_avx512(input, index)) };
+            unsafe { _mm512_storeu_ps(target.as_mut_ptr().add(index), sum) };
+            index += AVX512_F32_LANES;
+        }
+        end
+    }
+
+    /// Scales AVX-512 f32 samples and returns the processed prefix length.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_scale_f32_vectors(target: &mut [f32], scale: f32) -> usize {
+        let end = vectorized_end(target.len(), AVX512_F32_LANES);
+        let scale_vector = _mm512_set1_ps(scale);
+        let mut index = 0;
+        while index < end {
+            let product = unsafe { _mm512_mul_ps(load_avx512(target, index), scale_vector) };
+            unsafe { _mm512_storeu_ps(target.as_mut_ptr().add(index), product) };
+            index += AVX512_F32_LANES;
+        }
+        end
+    }
+
+    /// Adds AVX-512 complex AXPY values and returns processed complex samples.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_axpy_vectors(target: &mut [Complex<f32>], scale: Complex<f32>, input: &[Complex<f32>]) -> usize {
+        let end = vectorized_end(input.len(), AVX512_COMPLEX_LANES);
+        let scale_re = _mm512_set1_ps(scale.re);
+        let scale_im = unsafe { _mm512_mul_ps(_mm512_set1_ps(scale.im), load_avx512_sign()) };
+        let mut index = 0;
+        while index < end {
+            unsafe { store_avx512_axpy(target, input, index, scale_re, scale_im) };
+            index += AVX512_COMPLEX_LANES;
+        }
+        end
+    }
+
+    /// Writes AVX-512 complex products and returns processed complex samples.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_mul_vectors(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]) -> usize {
+        let end = vectorized_end(left.len(), AVX512_COMPLEX_LANES);
+        let sign = unsafe { load_avx512_sign() };
+        let mut index = 0;
+        while index < end {
+            unsafe { store_avx512_mul(left, right, output, index, sign) };
+            index += AVX512_COMPLEX_LANES;
+        }
+        end
+    }
+
+    /// Returns the AVX-512 f32 square sum and processed prefix length.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_power_sum_f32_vectors(input: &[f32]) -> (usize, f32) {
+        let end = vectorized_end(input.len(), AVX512_F32_LANES);
+        let mut accum = _mm512_setzero_ps();
+        let mut index = 0;
+        while index < end {
+            let values = unsafe { load_avx512(input, index) };
+            accum = _mm512_add_ps(accum, _mm512_mul_ps(values, values));
+            index += AVX512_F32_LANES;
+        }
+        (end, unsafe { horizontal_sum_avx512(accum) })
+    }
+
+    /// Writes AVX-512 magnitudes and returns processed complex samples.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_magnitude_vectors(input: &[Complex<f32>], output: &mut [f32]) -> usize {
+        let end = vectorized_end(input.len(), AVX512_COMPLEX_LANES);
+        let input_f32 = as_f32_slice(input);
+        let mut index = 0;
+        while index < end {
+            let magnitudes = unsafe { avx512_magnitudes(input_f32, index) };
+            output[index..index + AVX512_COMPLEX_LANES].copy_from_slice(&magnitudes);
+            index += AVX512_COMPLEX_LANES;
+        }
+        end
+    }
+
+    /// Loads four f32 values from an unaligned slice offset.
+    #[target_feature(enable = "sse2")]
+    unsafe fn load_sse(input: &[f32], index: usize) -> __m128 {
+        unsafe { _mm_loadu_ps(input.as_ptr().add(index)) }
+    }
+
+    /// Loads the SSE complex sign pattern.
+    #[target_feature(enable = "sse2")]
+    unsafe fn load_sse_sign() -> __m128 {
+        unsafe { _mm_loadu_ps(SSE_SIGN.as_ptr()) }
+    }
+
+    /// Stores one SSE AXPY vector into `target`.
+    #[target_feature(enable = "sse2")]
+    unsafe fn store_sse_axpy(target: &mut [Complex<f32>], input: &[Complex<f32>], index: usize, scale_re: __m128, scale_im: __m128) {
+        let input_vector = unsafe { load_sse(as_f32_slice(input), index * 2) };
+        let product = unsafe { complex_scale_sse(input_vector, scale_re, scale_im) };
+        let target_vector = unsafe { load_sse(as_f32_slice(target), index * 2) };
+        let output = _mm_add_ps(target_vector, product);
+        unsafe { _mm_storeu_ps(as_f32_slice_mut(target).as_mut_ptr().add(index * 2), output) };
+    }
+
+    /// Stores one SSE complex multiplication vector into `output`.
+    #[target_feature(enable = "sse2")]
+    unsafe fn store_sse_mul(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>], index: usize, sign: __m128) {
+        let left_vector = unsafe { load_sse(as_f32_slice(left), index * 2) };
+        let right_vector = unsafe { load_sse(as_f32_slice(right), index * 2) };
+        let product = unsafe { complex_mul_sse(left_vector, right_vector, sign) };
+        unsafe { _mm_storeu_ps(as_f32_slice_mut(output).as_mut_ptr().add(index * 2), product) };
+    }
+
+    /// Multiplies packed SSE complex values by a broadcast complex scalar.
+    #[target_feature(enable = "sse2")]
+    unsafe fn complex_scale_sse(input: __m128, scale_re: __m128, scale_im: __m128) -> __m128 {
+        let swapped = _mm_shuffle_ps(input, input, 0xb1);
+        let real_product = _mm_mul_ps(input, scale_re);
+        let imag_product = _mm_mul_ps(swapped, scale_im);
+        _mm_add_ps(real_product, imag_product)
+    }
+
+    /// Multiplies packed SSE complex values pairwise.
+    #[target_feature(enable = "sse2")]
+    unsafe fn complex_mul_sse(left: __m128, right: __m128, sign: __m128) -> __m128 {
+        let right_re = _mm_shuffle_ps(right, right, 0xa0);
+        let right_im = _mm_mul_ps(_mm_shuffle_ps(right, right, 0xf5), sign);
+        unsafe { complex_scale_sse(left, right_re, right_im) }
+    }
+
+    /// Horizontally sums an SSE f32 vector.
+    #[target_feature(enable = "sse2")]
+    unsafe fn horizontal_sum_sse(input: __m128) -> f32 {
+        let mut values = [0.0; SSE_F32_LANES];
+        unsafe { _mm_storeu_ps(values.as_mut_ptr(), input) };
+        values.iter().sum()
+    }
+
+    /// Calculates two SSE complex magnitudes.
+    #[target_feature(enable = "sse2")]
+    unsafe fn sse2_magnitudes(input_f32: &[f32], index: usize) -> [f32; SSE_COMPLEX_LANES] {
+        let values = unsafe { load_sse(input_f32, index * 2) };
+        let squares = _mm_mul_ps(values, values);
+        let paired = _mm_add_ps(squares, _mm_shuffle_ps(squares, squares, 0xb1));
+        let roots = _mm_sqrt_ps(paired);
+        let mut lanes = [0.0; SSE_F32_LANES];
+        unsafe { _mm_storeu_ps(lanes.as_mut_ptr(), roots) };
+        [lanes[0], lanes[2]]
+    }
+
+    /// Loads eight f32 values from an unaligned slice offset.
+    #[target_feature(enable = "avx2")]
+    unsafe fn load_avx2(input: &[f32], index: usize) -> __m256 {
+        unsafe { _mm256_loadu_ps(input.as_ptr().add(index)) }
+    }
+
+    /// Loads the AVX2 complex sign pattern.
+    #[target_feature(enable = "avx2")]
+    unsafe fn load_avx2_sign() -> __m256 {
+        unsafe { _mm256_loadu_ps(AVX2_SIGN.as_ptr()) }
+    }
+
+    /// Stores one AVX2 AXPY vector into `target`.
+    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "fma")]
+    unsafe fn store_avx2_axpy(target: &mut [Complex<f32>], input: &[Complex<f32>], index: usize, scale_re: __m256, scale_im: __m256) {
+        let input_vector = unsafe { load_avx2(as_f32_slice(input), index * 2) };
+        let product = complex_scale_avx2(input_vector, scale_re, scale_im);
+        let target_vector = unsafe { load_avx2(as_f32_slice(target), index * 2) };
+        let output = _mm256_add_ps(target_vector, product);
+        unsafe { _mm256_storeu_ps(as_f32_slice_mut(target).as_mut_ptr().add(index * 2), output) };
+    }
+
+    /// Stores one AVX2 complex multiplication vector into `output`.
+    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "fma")]
+    unsafe fn store_avx2_mul(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>], index: usize, sign: __m256) {
+        let left_vector = unsafe { load_avx2(as_f32_slice(left), index * 2) };
+        let right_vector = unsafe { load_avx2(as_f32_slice(right), index * 2) };
+        let product = complex_mul_avx2(left_vector, right_vector, sign);
+        unsafe { _mm256_storeu_ps(as_f32_slice_mut(output).as_mut_ptr().add(index * 2), product) };
+    }
+
+    /// Multiplies packed AVX2 complex values by a broadcast complex scalar.
+    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "fma")]
+    fn complex_scale_avx2(input: __m256, scale_re: __m256, scale_im: __m256) -> __m256 {
+        let swapped = _mm256_permute_ps(input, 0xb1);
+        let real_product = _mm256_mul_ps(input, scale_re);
+        _mm256_fmadd_ps(swapped, scale_im, real_product)
+    }
+
+    /// Multiplies packed AVX2 complex values pairwise.
+    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "fma")]
+    fn complex_mul_avx2(left: __m256, right: __m256, sign: __m256) -> __m256 {
+        let right_re = _mm256_permute_ps(right, 0xa0);
+        let right_im = _mm256_mul_ps(_mm256_permute_ps(right, 0xf5), sign);
+        complex_scale_avx2(left, right_re, right_im)
+    }
+
+    /// Horizontally sums an AVX2 f32 vector.
+    #[target_feature(enable = "avx2")]
+    unsafe fn horizontal_sum_avx2(input: __m256) -> f32 {
+        let mut values = [0.0; AVX2_F32_LANES];
+        unsafe { _mm256_storeu_ps(values.as_mut_ptr(), input) };
+        values.iter().sum()
+    }
+
+    /// Calculates four AVX2 complex magnitudes.
+    #[target_feature(enable = "avx2")]
+    unsafe fn avx2_magnitudes(input_f32: &[f32], index: usize) -> [f32; AVX2_COMPLEX_LANES] {
+        let values = unsafe { load_avx2(input_f32, index * 2) };
+        let squares = _mm256_mul_ps(values, values);
+        let paired = _mm256_add_ps(squares, _mm256_permute_ps(squares, 0xb1));
+        let roots = _mm256_sqrt_ps(paired);
+        let mut lanes = [0.0; AVX2_F32_LANES];
+        unsafe { _mm256_storeu_ps(lanes.as_mut_ptr(), roots) };
+        [lanes[0], lanes[2], lanes[4], lanes[6]]
+    }
+
+    /// Loads sixteen f32 values from an unaligned slice offset.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn load_avx512(input: &[f32], index: usize) -> __m512 {
+        unsafe { _mm512_loadu_ps(input.as_ptr().add(index)) }
+    }
+
+    /// Loads the AVX-512 complex sign pattern.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn load_avx512_sign() -> __m512 {
+        unsafe { _mm512_loadu_ps(AVX512_SIGN.as_ptr()) }
+    }
+
+    /// Stores one AVX-512 AXPY vector into `target`.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn store_avx512_axpy(target: &mut [Complex<f32>], input: &[Complex<f32>], index: usize, scale_re: __m512, scale_im: __m512) {
+        let input_vector = unsafe { load_avx512(as_f32_slice(input), index * 2) };
+        let product = complex_scale_avx512(input_vector, scale_re, scale_im);
+        let target_vector = unsafe { load_avx512(as_f32_slice(target), index * 2) };
+        let output = _mm512_add_ps(target_vector, product);
+        unsafe { _mm512_storeu_ps(as_f32_slice_mut(target).as_mut_ptr().add(index * 2), output) };
+    }
+
+    /// Stores one AVX-512 complex multiplication vector into `output`.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn store_avx512_mul(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>], index: usize, sign: __m512) {
+        let left_vector = unsafe { load_avx512(as_f32_slice(left), index * 2) };
+        let right_vector = unsafe { load_avx512(as_f32_slice(right), index * 2) };
+        let product = complex_mul_avx512(left_vector, right_vector, sign);
+        unsafe { _mm512_storeu_ps(as_f32_slice_mut(output).as_mut_ptr().add(index * 2), product) };
+    }
+
+    /// Multiplies packed AVX-512 complex values by a broadcast complex scalar.
+    #[target_feature(enable = "avx512f")]
+    fn complex_scale_avx512(input: __m512, scale_re: __m512, scale_im: __m512) -> __m512 {
+        let swapped = _mm512_permute_ps(input, 0xb1);
+        let real_product = _mm512_mul_ps(input, scale_re);
+        _mm512_fmadd_ps(swapped, scale_im, real_product)
+    }
+
+    /// Multiplies packed AVX-512 complex values pairwise.
+    #[target_feature(enable = "avx512f")]
+    fn complex_mul_avx512(left: __m512, right: __m512, sign: __m512) -> __m512 {
+        let right_re = _mm512_permute_ps(right, 0xa0);
+        let right_im = _mm512_mul_ps(_mm512_permute_ps(right, 0xf5), sign);
+        complex_scale_avx512(left, right_re, right_im)
+    }
+
+    /// Horizontally sums an AVX-512 f32 vector.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn horizontal_sum_avx512(input: __m512) -> f32 {
+        let mut values = [0.0; AVX512_F32_LANES];
+        unsafe { _mm512_storeu_ps(values.as_mut_ptr(), input) };
+        values.iter().sum()
+    }
+
+    /// Calculates eight AVX-512 complex magnitudes.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_magnitudes(input_f32: &[f32], index: usize) -> [f32; AVX512_COMPLEX_LANES] {
+        let values = unsafe { load_avx512(input_f32, index * 2) };
+        let squares = _mm512_mul_ps(values, values);
+        let paired = _mm512_add_ps(squares, _mm512_permute_ps(squares, 0xb1));
+        let roots = _mm512_sqrt_ps(paired);
+        let mut lanes = [0.0; AVX512_F32_LANES];
+        unsafe { _mm512_storeu_ps(lanes.as_mut_ptr(), roots) };
+        [lanes[0], lanes[2], lanes[4], lanes[6], lanes[8], lanes[10], lanes[12], lanes[14]]
     }
 }
-
-// ============================================================================
-// f64 SIMD Operations (Similar to f32 but using F64Batch)
-// ============================================================================
-
-impl VectorSimd<f64> {
-    /// Creates a VectorSimd with evenly spaced values (linspace)
-    pub fn linspace(start: f64, stop: f64, length: usize) -> Self {
-        if length == 0 {
-            return Self::new();
-        }
-        if length == 1 {
-            return Self::from_vec(vec![start]);
-        }
-
-        let step = (stop - start) / (length as f64 - 1.0);
-        let data: Vec<f64> = (0..length)
-            .map(|i| start + (i as f64) * step)
-            .collect();
-        Self { data }
-    }
-}
-
-// Implement all the same operations for f64...
-// (Add, Sub, Mul, Div for vector and scalar operations)
-// I'll implement a few key ones to show the pattern:
-
-impl Add for VectorSimd<f64> {
-    type Output = VectorSimd<f64>;
-
-    fn add(self, rhs: Self) -> Self::Output {
-        use simd_config::F64Batch;
-        self.process_simd_batches::<F64Batch>(
-            &rhs,
-            |a, b| SimdBatch::add(a, b),
-            |a, b| a + b,
-        )
-    }
-}
-
-impl Add for &VectorSimd<f64> {
-    type Output = VectorSimd<f64>;
-
-    fn add(self, rhs: Self) -> Self::Output {
-        use simd_config::F64Batch;
-        self.process_simd_batches::<F64Batch>(
-            rhs,
-            |a, b| SimdBatch::add(a, b),
-            |a, b| a + b,
-        )
-    }
-}
-
-impl Mul for VectorSimd<f64> {
-    type Output = VectorSimd<f64>;
-
-    fn mul(self, rhs: Self) -> Self::Output {
-        use simd_config::F64Batch;
-        self.process_simd_batches::<F64Batch>(
-            &rhs,
-            |a, b| SimdBatch::mul(a, b),
-            |a, b| a * b,
-        )
-    }
-}
-
-impl Mul for &VectorSimd<f64> {
-    type Output = VectorSimd<f64>;
-
-    fn mul(self, rhs: Self) -> Self::Output {
-        use simd_config::F64Batch;
-        self.process_simd_batches::<F64Batch>(
-            rhs,
-            |a, b| SimdBatch::mul(a, b),
-            |a, b| a * b,
-        )
-    }
-}
-
-impl DivAssign<f64> for VectorSimd<f64> {
-    fn div_assign(&mut self, rhs: f64) {
-        use simd_config::F64Batch;
-        self.process_simd_batches_scalar_inplace::<F64Batch>(
-            rhs,
-            |a, b| SimdBatch::div(a, b),
-            |a, b| a / b,
-        );
-    }
-}
-
-// ============================================================================
-// Complex Number Optimized Operations
-// ============================================================================
-
-// Complex number operations for Complex<f32>
-//
-// Performance Analysis:
-// - Explicit SIMD with `wide` crate doesn't provide significant benefits for complex operations
-// - The `wide` crate lacks shuffle/swizzle instructions needed for efficient complex math
-// - With only 2 complex numbers per f32x4 register, extraction overhead is too high
-// - LLVM's auto-vectorization is excellent for simple loops with complex numbers
-//
-// Optimization Strategy:
-// - Use simple loops that LLVM can auto-vectorize
-// - Apply memory allocation optimization: Vec::with_capacity + unsafe set_len
-// - This avoids initialization overhead while maintaining good performance
-//
-// Benchmark Results (Complex<f32> multiplication, 100k elements):
-// - Optimized (allocation fix):  206 µs
-// - Auto-vectorized baseline:     83 µs  (0.40x - compiler is excellent!)
-// - Non-vectorized baseline:     276 µs  (1.34x - we beat non-vectorized code!)
-//
-// Key Insight: The real performance win comes from avoiding unnecessary zero-initialization,
-// not from explicit SIMD. LLVM auto-vectorization handles the rest.
-
-impl VectorSimd<Complex<f32>> {
-    /// Optimized complex addition (leverages LLVM auto-vectorization + allocation optimization)
-    fn add_optimized(&self, other: &VectorSimd<Complex<f32>>) -> VectorSimd<Complex<f32>> {
-        assert_eq!(self.len(), other.len());
-
-        // Allocate without initialization for better performance
-        let mut result = Vec::with_capacity(self.len());
-        unsafe {
-            result.set_len(self.len());
-        }
-
-        // Simple loop - LLVM will auto-vectorize this
-        for i in 0..self.len() {
-            result[i] = self.data[i] + other.data[i];
-        }
-
-        VectorSimd { data: result }
-    }
-
-    /// Optimized complex multiplication (uses auto-vectorization)
-    fn mul_optimized(&self, other: &VectorSimd<Complex<f32>>) -> VectorSimd<Complex<f32>> {
-        assert_eq!(self.len(), other.len());
-
-        // Allocate without initialization
-        let mut result = Vec::with_capacity(self.len());
-        unsafe {
-            result.set_len(self.len());
-        }
-
-        // Simple loop - LLVM will auto-vectorize complex multiplication
-        for i in 0..self.len() {
-            result[i] = self.data[i] * other.data[i];
-        }
-
-        VectorSimd { data: result }
-    }
-
-    /// Optimized complex subtraction (uses auto-vectorization)
-    fn sub_optimized(&self, other: &VectorSimd<Complex<f32>>) -> VectorSimd<Complex<f32>> {
-        assert_eq!(self.len(), other.len());
-
-        let mut result = Vec::with_capacity(self.len());
-        unsafe {
-            result.set_len(self.len());
-        }
-
-        for i in 0..self.len() {
-            result[i] = self.data[i] - other.data[i];
-        }
-
-        VectorSimd { data: result }
-    }
-
-    /// Optimized complex division (uses auto-vectorization)
-    fn div_optimized(&self, other: &VectorSimd<Complex<f32>>) -> VectorSimd<Complex<f32>> {
-        assert_eq!(self.len(), other.len());
-
-        let mut result = Vec::with_capacity(self.len());
-        unsafe {
-            result.set_len(self.len());
-        }
-
-        for i in 0..self.len() {
-            result[i] = self.data[i] / other.data[i];
-        }
-
-        VectorSimd { data: result }
-    }
-}
-
-// Operator trait implementations using SIMD
-
-impl Add for VectorSimd<Complex<f32>> {
-    type Output = VectorSimd<Complex<f32>>;
-
-    fn add(self, rhs: Self) -> Self::Output {
-        self.add_optimized(&rhs)
-    }
-}
-
-impl Add for &VectorSimd<Complex<f32>> {
-    type Output = VectorSimd<Complex<f32>>;
-
-    fn add(self, rhs: Self) -> Self::Output {
-        self.add_optimized(rhs)
-    }
-}
-
-impl Sub for VectorSimd<Complex<f32>> {
-    type Output = VectorSimd<Complex<f32>>;
-
-    fn sub(self, rhs: Self) -> Self::Output {
-        self.sub_optimized(&rhs)
-    }
-}
-
-impl Sub for &VectorSimd<Complex<f32>> {
-    type Output = VectorSimd<Complex<f32>>;
-
-    fn sub(self, rhs: Self) -> Self::Output {
-        self.sub_optimized(rhs)
-    }
-}
-
-impl Mul for VectorSimd<Complex<f32>> {
-    type Output = VectorSimd<Complex<f32>>;
-
-    fn mul(self, rhs: Self) -> Self::Output {
-        self.mul_optimized(&rhs)
-    }
-}
-
-impl Mul for &VectorSimd<Complex<f32>> {
-    type Output = VectorSimd<Complex<f32>>;
-
-    fn mul(self, rhs: Self) -> Self::Output {
-        self.mul_optimized(rhs)
-    }
-}
-
-impl Div for VectorSimd<Complex<f32>> {
-    type Output = VectorSimd<Complex<f32>>;
-
-    fn div(self, rhs: Self) -> Self::Output {
-        self.div_optimized(&rhs)
-    }
-}
-
-impl Div for &VectorSimd<Complex<f32>> {
-    type Output = VectorSimd<Complex<f32>>;
-
-    fn div(self, rhs: Self) -> Self::Output {
-        self.div_optimized(rhs)
-    }
-}
-
-impl VectorSimd<Complex<f32>> {
-    /// SIMD-optimized convolution for complex-valued signals
-    pub fn convolve(&self, kernel: &VectorSimd<Complex<f32>>) -> VectorSimd<Complex<f32>> {
-        if kernel.size() > self.size() {
-            return VectorSimd::new();
-        }
-
-        use simd_config::F32Batch;
-        const LANES: usize = 2; // 2 complex numbers per f32x4
-
-        let output_size = self.size() - kernel.size() + 1;
-        let mut result = vec![Complex::new(0.0, 0.0); output_size];
-
-        let simd_chunks = output_size / LANES;
-
-        // Process LANES output samples at a time
-        for chunk_idx in 0..simd_chunks {
-            let base_idx = chunk_idx * LANES;
-            let mut accum = F32Batch::from([0.0, 0.0, 0.0, 0.0]);
-
-            // For each kernel tap
-            for k in 0..kernel.size() {
-                // Load 2 complex signal values - SAFETY: Complex<f32> has repr(C) layout
-                let sig_floats: &[f32] = unsafe {
-                    std::slice::from_raw_parts(
-                        self.data[base_idx + k..].as_ptr() as *const f32,
-                        4
-                    )
-                };
-                let sig = F32Batch::from(&sig_floats[0..4]);
-
-                // Broadcast kernel value to both lanes
-                let kern = Complex::new(kernel.data[k].re, kernel.data[k].im);
-                let kern_batch = F32Batch::from([kern.re, kern.im, kern.re, kern.im]);
-
-                // Complex multiply: sig * kern
-                let sig_arr = sig.to_array();
-                let sig_re_re = F32Batch::from([sig_arr[0], sig_arr[0], sig_arr[2], sig_arr[2]]);
-                let sig_im_im = F32Batch::from([sig_arr[1], sig_arr[1], sig_arr[3], sig_arr[3]]);
-                let kern_arr = kern_batch.to_array();
-                let kern_re_im = kern_batch;
-                let kern_im_re = F32Batch::from([kern_arr[1], kern_arr[0], kern_arr[3], kern_arr[2]]);
-
-                let prod1 = sig_re_re * kern_re_im;
-                let prod2 = sig_im_im * kern_im_re;
-                let signs_neg = F32Batch::from([-1.0, 1.0, -1.0, 1.0]);
-                let prod = prod1 + (prod2 * signs_neg);
-
-                accum = accum + prod;
-            }
-
-            // Store result
-            let accum_arr = accum.to_array();
-            result[base_idx] = Complex::new(accum_arr[0], accum_arr[1]);
-            result[base_idx + 1] = Complex::new(accum_arr[2], accum_arr[3]);
-        }
-
-        // Handle remaining elements
-        for i in (simd_chunks * LANES)..output_size {
-            let mut sum = Complex::new(0.0, 0.0);
-            for j in 0..kernel.size() {
-                sum += self.data[i + j] * kernel.data[j];
-            }
-            result[i] = sum;
-        }
-
-        VectorSimd { data: result }
-    }
-}
-
-// ============================================================================
-// Tests
-// ============================================================================
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_f32_add() {
-        let a = VectorSimd::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0]);
-        let b = VectorSimd::from_vec(vec![5.0f32, 6.0, 7.0, 8.0, 9.0]);
-
-        let c = &a + &b;
-        assert_eq!(c[0], 6.0);
-        assert_eq!(c[1], 8.0);
-        assert_eq!(c[4], 14.0);
-    }
+    const EPSILON: f32 = 1.0e-4;
 
     #[test]
-    fn test_f32_mul_scalar() {
-        let a = VectorSimd::from_vec(vec![1.0f32, 2.0, 3.0, 4.0]);
-        let b = &a * 2.0;
-
-        assert_eq!(b[0], 2.0);
-        assert_eq!(b[3], 8.0);
+    fn selected_plan_matches_backend_geometry() {
+        let plan = selected_iq_plan();
+        assert_eq!(plan.backend(), SELECTED_BACKEND);
+        assert_eq!(plan.register_bits(), REGISTER_BITS);
+        assert_eq!(plan.iq_lanes(), IQ_LANES);
     }
 
     #[test]
-    fn test_f32_div_assign() {
-        let mut v = VectorSimd::from_vec(vec![10.0f32, 20.0, 30.0]);
-        v /= 2.0;
-
-        assert_eq!(v[0], 5.0);
-        assert_eq!(v[1], 10.0);
-        assert_eq!(v[2], 15.0);
-    }
-
-    #[test]
-    fn test_complex_operations() {
-        let a = VectorSimd::from_vec(vec![
-            Complex::new(2.0f32, 3.0),
-            Complex::new(4.0, 5.0),
-        ]);
-        let b = VectorSimd::from_vec(vec![
-            Complex::new(4.0f32, 5.0),
-            Complex::new(6.0, 7.0),
-        ]);
-
-        let c = &a * &b;
-        // (2+3i) * (4+5i) = 8 + 10i + 12i + 15i² = 8 + 22i - 15 = -7 + 22i
-        assert_eq!(c[0].re, -7.0);
-        assert_eq!(c[0].im, 22.0);
-    }
-
-    #[test]
-    fn test_f32_abs() {
-        let a = VectorSimd::from_vec(vec![-1.0f32, 2.0, -3.0, 4.0, -5.0]);
-        let b = a.abs();
-
-        assert_eq!(b[0], 1.0);
-        assert_eq!(b[1], 2.0);
-        assert_eq!(b[2], 3.0);
-        assert_eq!(b[3], 4.0);
-        assert_eq!(b[4], 5.0);
-    }
-
-    #[test]
-    fn test_f32_linspace() {
-        let v = VectorSimd::<f32>::linspace(0.0, 10.0, 11);
-
-        assert_eq!(v.len(), 11);
-        assert_eq!(v[0], 0.0);
-        assert_eq!(v[10], 10.0);
-        assert!((v[5] - 5.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn test_convolution() {
-        let signal = VectorSimd::from_vec((0..1024).map(|x| x as f32).collect::<Vec<_>>());
-        let kernel = VectorSimd::from_vec(vec![1.0f32, 0.0, 1.0]);
-
-        let result = signal.convolve(&kernel);
-
-        // First element should be signal[0] + signal[2] = 0 + 2 = 2
-        assert_eq!(result[0], 2.0);
-        // Second element should be signal[1] + signal[3] = 1 + 3 = 4
-        assert_eq!(result[1], 4.0);
-    }
-
-    // ========================================================================
-    // Benchmark Tests - Compare SIMD vs Scalar Performance
-    // ========================================================================
-
-    use std::time::Instant;
-
-    /// Helper function to run scalar addition (non-SIMD baseline)
-    /// This uses iterator chains which LLVM will auto-vectorize
-    fn scalar_add_f32(a: &[f32], b: &[f32]) -> Vec<f32> {
-        a.iter().zip(b.iter()).map(|(x, y)| x + y).collect()
-    }
-
-    /// Non-vectorizable scalar addition (forced to prevent LLVM auto-vectorization)
-    #[inline(never)]
-    fn scalar_add_f32_no_vec(a: &[f32], b: &[f32]) -> Vec<f32> {
-        let mut result = Vec::with_capacity(a.len());
-        for i in 0..a.len() {
-            // black_box prevents the compiler from optimizing this loop
-            result.push(std::hint::black_box(a[i] + b[i]));
-        }
-        result
-    }
-
-    /// Helper function to run scalar multiplication (non-SIMD baseline)
-    fn scalar_mul_f32(a: &[f32], b: &[f32]) -> Vec<f32> {
-        a.iter().zip(b.iter()).map(|(x, y)| x * y).collect()
-    }
-
-    /// Non-vectorizable scalar multiplication
-    #[inline(never)]
-    fn scalar_mul_f32_no_vec(a: &[f32], b: &[f32]) -> Vec<f32> {
-        let mut result = Vec::with_capacity(a.len());
-        for i in 0..a.len() {
-            result.push(std::hint::black_box(a[i] * b[i]));
-        }
-        result
-    }
-
-    /// Helper function to run scalar convolution (non-SIMD baseline)
-    fn scalar_convolve_f32(signal: &[f32], kernel: &[f32]) -> Vec<f32> {
-        let output_size = signal.len() - kernel.len() + 1;
-        let mut result = vec![0.0f32; output_size];
-
-        for i in 0..output_size {
-            let mut sum = 0.0f32;
-            for j in 0..kernel.len() {
-                sum += signal[i + j] * kernel[j];
-            }
-            result[i] = sum;
-        }
-        result
-    }
-
-    #[test]
-    fn benchmark_f32_addition() {
-        println!("\n=== Benchmark: f32 Addition ===");
-
-        for &size in &[10_000, 100_000] {
-            println!("\nVector size: {}", size);
-
-            let data_a: Vec<f32> = (0..size).map(|i| (i % 1000) as f32).collect();
-            let data_b: Vec<f32> = (0..size).map(|i| ((i * 7) % 1000) as f32).collect();
-
-            let vec_a = VectorSimd::from_vec(data_a.clone());
-            let vec_b = VectorSimd::from_vec(data_b.clone());
-
-            const ITERATIONS: usize = 10;
-
-            // Benchmark SIMD
-            let start = Instant::now();
-            let mut simd_result = VectorSimd::new();
-            for _ in 0..ITERATIONS {
-                simd_result = &vec_a + &vec_b;
-            }
-            let simd_time = start.elapsed() / ITERATIONS as u32;
-            std::hint::black_box(&simd_result); // Prevent optimization
-
-            // Benchmark Scalar
-            let start = Instant::now();
-            let mut scalar_result = Vec::new();
-            for _ in 0..ITERATIONS {
-                scalar_result = scalar_add_f32(&data_a, &data_b);
-            }
-            let scalar_time = start.elapsed() / ITERATIONS as u32;
-            std::hint::black_box(&scalar_result); // Prevent optimization
-
-            let speedup = scalar_time.as_nanos() as f64 / simd_time.as_nanos() as f64;
-
-            println!("  SIMD:   {:?}", simd_time);
-            println!("  Scalar: {:?}", scalar_time);
-            println!("  Speedup: {:.2}x", speedup);
+    fn selected_backend_matches_scalar_reference() {
+        for len in test_lengths() {
+            assert_backend_matches_reference::<SelectedBackend>(len);
         }
     }
 
     #[test]
-    fn benchmark_f32_multiplication() {
-        println!("\n=== Benchmark: f32 Multiplication ===");
+    fn scalar_backend_matches_reference() {
+        for len in test_lengths() {
+            assert_backend_matches_reference::<scalar::ScalarBackend>(len);
+        }
+    }
 
-        for &size in &[10_000, 100_000] {
-            println!("\nVector size: {}", size);
-
-            let data_a: Vec<f32> = (0..size).map(|i| (i % 1000) as f32 / 1000.0).collect();
-            let data_b: Vec<f32> = (0..size).map(|i| ((i * 7) % 1000) as f32 / 1000.0).collect();
-
-            let vec_a = VectorSimd::from_vec(data_a.clone());
-            let vec_b = VectorSimd::from_vec(data_b.clone());
-
-            const ITERATIONS: usize = 10;
-
-            // Benchmark SIMD
-            let start = Instant::now();
-            let mut simd_result = VectorSimd::new();
-            for _ in 0..ITERATIONS {
-                simd_result = &vec_a * &vec_b;
-            }
-            let simd_time = start.elapsed() / ITERATIONS as u32;
-            std::hint::black_box(&simd_result);
-
-            // Benchmark Scalar
-            let start = Instant::now();
-            let mut scalar_result = Vec::new();
-            for _ in 0..ITERATIONS {
-                scalar_result = scalar_mul_f32(&data_a, &data_b);
-            }
-            let scalar_time = start.elapsed() / ITERATIONS as u32;
-            std::hint::black_box(&scalar_result);
-
-            let speedup = scalar_time.as_nanos() as f64 / simd_time.as_nanos() as f64;
-
-            println!("  SIMD:   {:?}", simd_time);
-            println!("  Scalar: {:?}", scalar_time);
-            println!("  Speedup: {:.2}x", speedup);
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[test]
+    fn available_x86_backends_match_reference() {
+        for len in test_lengths() {
+            assert_backend_matches_reference::<x86::Sse2Backend>(len);
+            assert_avx2_backend_matches_reference(len);
+            assert_avx512_backend_matches_reference(len);
         }
     }
 
     #[test]
-    fn benchmark_f32_scalar_multiply() {
-        println!("\n=== Benchmark: f32 Scalar Multiply (vec * scalar) ===");
-
-        for &size in &[10_000, 100_000] {
-            println!("\nVector size: {}", size);
-
-            let data: Vec<f32> = (0..size).map(|i| (i % 1000) as f32 / 1000.0).collect();
-            let vec = VectorSimd::from_vec(data.clone());
-            let scalar = 2.5f32;
-
-            const ITERATIONS: usize = 10;
-
-            // Benchmark SIMD
-            let start = Instant::now();
-            let mut simd_result = VectorSimd::new();
-            for _ in 0..ITERATIONS {
-                simd_result = &vec * scalar;
-            }
-            let simd_time = start.elapsed() / ITERATIONS as u32;
-            std::hint::black_box(&simd_result);
-
-            // Benchmark Scalar
-            let start = Instant::now();
-            let mut scalar_result = Vec::new();
-            for _ in 0..ITERATIONS {
-                scalar_result = data.iter().map(|&x| x * scalar).collect();
-            }
-            let scalar_time = start.elapsed() / ITERATIONS as u32;
-            std::hint::black_box(&scalar_result);
-
-            let speedup = scalar_time.as_nanos() as f64 / simd_time.as_nanos() as f64;
-
-            println!("  SIMD:   {:?}", simd_time);
-            println!("  Scalar: {:?}", scalar_time);
-            println!("  Speedup: {:.2}x", speedup);
-        }
+    fn frequency_shifter_keeps_phase_across_blocks() {
+        let input = make_iq(97, 0.11);
+        let mut whole = input.clone();
+        let mut chunked = input.clone();
+        FrequencyShifter::new(12_500.0, 1_000_000.0).process_block(&mut whole);
+        shift_in_chunks(&mut chunked);
+        assert_complex_slices_close(&whole, &chunked, EPSILON);
     }
 
     #[test]
-    fn benchmark_f32_division() {
-        println!("\n=== Benchmark: f32 Division ===");
-
-        for &size in &[10_000, 100_000] {
-            println!("\nVector size: {}", size);
-
-            let data_a: Vec<f32> = (0..size).map(|i| (i % 1000) as f32 + 1.0).collect();
-            let data_b: Vec<f32> = (0..size).map(|i| ((i * 7) % 1000) as f32 + 1.0).collect();
-
-            let vec_a = VectorSimd::from_vec(data_a.clone());
-            let vec_b = VectorSimd::from_vec(data_b.clone());
-
-            const ITERATIONS: usize = 10;
-
-            // Benchmark SIMD
-            let start = Instant::now();
-            let mut simd_result = VectorSimd::new();
-            for _ in 0..ITERATIONS {
-                simd_result = &vec_a / &vec_b;
-            }
-            let simd_time = start.elapsed() / ITERATIONS as u32;
-            std::hint::black_box(&simd_result);
-
-            // Benchmark Scalar
-            let start = Instant::now();
-            let mut scalar_result = Vec::new();
-            for _ in 0..ITERATIONS {
-                scalar_result = data_a.iter().zip(data_b.iter()).map(|(x, y)| x / y).collect();
-            }
-            let scalar_time = start.elapsed() / ITERATIONS as u32;
-            std::hint::black_box(&scalar_result);
-
-            let speedup = scalar_time.as_nanos() as f64 / simd_time.as_nanos() as f64;
-
-            println!("  SIMD:   {:?}", simd_time);
-            println!("  Scalar: {:?}", scalar_time);
-            println!("  Speedup: {:.2}x", speedup);
-        }
+    fn fir_filter_keeps_delay_across_blocks() {
+        let input = make_iq(89, 0.07);
+        let taps = make_iq(7, -0.13);
+        let mut whole_output = vec![Complex::new(0.0, 0.0); input.len()];
+        let mut chunked_output = vec![Complex::new(0.0, 0.0); input.len()];
+        FirFilter::new(taps.clone()).process_block_to(&input, &mut whole_output);
+        fir_in_chunks(&input, &mut chunked_output, taps);
+        assert_complex_slices_close(&whole_output, &chunked_output, EPSILON);
     }
 
     #[test]
-    fn benchmark_f32_abs() {
-        println!("\n=== Benchmark: f32 Absolute Value ===");
+    fn fir_inplace_matches_output_mode() {
+        let input = make_iq(67, 0.05);
+        let taps = make_iq(5, 0.17);
+        let mut output_mode = vec![Complex::new(0.0, 0.0); input.len()];
+        let mut inplace_mode = input.clone();
+        FirFilter::new(taps.clone()).process_block_to(&input, &mut output_mode);
+        FirFilter::new(taps).process_block_inplace(&mut inplace_mode);
+        assert_complex_slices_close(&output_mode, &inplace_mode, EPSILON);
+    }
 
-        for &size in &[10_000, 100_000] {
-            println!("\nVector size: {}", size);
+    /// Checks one backend against scalar reference operations for a block length.
+    fn assert_backend_matches_reference<B: IqBackend>(len: usize) {
+        assert_add_to_matches::<B>(len);
+        assert_add_inplace_matches::<B>(len);
+        assert_scale_inplace_matches::<B>(len);
+        assert_axpy_inplace_matches::<B>(len);
+        assert_mul_to_matches::<B>(len);
+        assert_power_sum_matches::<B>(len);
+        assert_magnitude_matches::<B>(len);
+    }
 
-            let data: Vec<f32> = (0..size).map(|i| if i % 2 == 0 { i as f32 } else { -(i as f32) }).collect();
-            let vec = VectorSimd::from_vec(data.clone());
+    /// Checks backend add-to output for a block length.
+    fn assert_add_to_matches<B: IqBackend>(len: usize) {
+        let left = make_iq(len, 0.13);
+        let right = make_iq(len, -0.21);
+        let mut actual = zero_iq(len);
+        let mut expected = zero_iq(len);
+        B::iq_add_to(&left, &right, &mut actual);
+        scalar::iq_add_to(&left, &right, &mut expected);
+        assert_complex_slices_close(&actual, &expected, EPSILON);
+    }
 
-            const ITERATIONS: usize = 10;
+    /// Checks backend in-place add output for a block length.
+    fn assert_add_inplace_matches<B: IqBackend>(len: usize) {
+        let mut actual = make_iq(len, 0.13);
+        let mut expected = actual.clone();
+        let input = make_iq(len, -0.21);
+        B::iq_add_inplace(&mut actual, &input);
+        scalar::iq_add_inplace(&mut expected, &input);
+        assert_complex_slices_close(&actual, &expected, EPSILON);
+    }
 
-            // Benchmark SIMD
-            let start = Instant::now();
-            let mut simd_result = VectorSimd::new();
-            for _ in 0..ITERATIONS {
-                simd_result = vec.abs();
-            }
-            let simd_time = start.elapsed() / ITERATIONS as u32;
-            std::hint::black_box(&simd_result);
+    /// Checks backend in-place scale output for a block length.
+    fn assert_scale_inplace_matches<B: IqBackend>(len: usize) {
+        let mut actual = make_iq(len, 0.13);
+        let mut expected = actual.clone();
+        B::iq_scale_inplace(&mut actual, -1.75);
+        scalar::iq_scale_inplace(&mut expected, -1.75);
+        assert_complex_slices_close(&actual, &expected, EPSILON);
+    }
 
-            // Benchmark Scalar
-            let start = Instant::now();
-            let mut scalar_result = Vec::new();
-            for _ in 0..ITERATIONS {
-                scalar_result = data.iter().map(|&x| x.abs()).collect();
-            }
-            let scalar_time = start.elapsed() / ITERATIONS as u32;
-            std::hint::black_box(&scalar_result);
+    /// Checks backend AXPY output for a block length.
+    fn assert_axpy_inplace_matches<B: IqBackend>(len: usize) {
+        let mut actual = make_iq(len, 0.13);
+        let mut expected = actual.clone();
+        let input = make_iq(len, -0.21);
+        let scale = Complex::new(0.75, -0.25);
+        B::iq_axpy_inplace(&mut actual, scale, &input);
+        scalar::iq_axpy_inplace(&mut expected, scale, &input);
+        assert_complex_slices_close(&actual, &expected, EPSILON);
+    }
 
-            let speedup = scalar_time.as_nanos() as f64 / simd_time.as_nanos() as f64;
+    /// Checks backend multiply output for a block length.
+    fn assert_mul_to_matches<B: IqBackend>(len: usize) {
+        let left = make_iq(len, 0.13);
+        let right = make_iq(len, -0.21);
+        let mut actual = zero_iq(len);
+        let mut expected = zero_iq(len);
+        B::iq_mul_to(&left, &right, &mut actual);
+        scalar::iq_mul_to(&left, &right, &mut expected);
+        assert_complex_slices_close(&actual, &expected, EPSILON);
+    }
 
-            println!("  SIMD:   {:?}", simd_time);
-            println!("  Scalar: {:?}", scalar_time);
-            println!("  Speedup: {:.2}x", speedup);
+    /// Checks backend power sum output for a block length.
+    fn assert_power_sum_matches<B: IqBackend>(len: usize) {
+        let input = make_iq(len, 0.13);
+        let actual = B::iq_power_sum(&input);
+        let expected = scalar::iq_power_sum(&input);
+        assert_close(actual, expected, 2.0e-3);
+    }
+
+    /// Checks backend magnitude output for a block length.
+    fn assert_magnitude_matches<B: IqBackend>(len: usize) {
+        let input = make_iq(len, 0.13);
+        let mut actual = vec![0.0; len];
+        let mut expected = vec![0.0; len];
+        B::magnitude_to(&input, &mut actual);
+        scalar::magnitude_to(&input, &mut expected);
+        assert_slices_close(&actual, &expected, EPSILON);
+    }
+
+    /// Runs AVX2 backend checks when the current test CPU supports it.
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    fn assert_avx2_backend_matches_reference(len: usize) {
+        if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") {
+            assert_backend_matches_reference::<x86::Avx2Backend>(len);
         }
     }
 
-    #[test]
-    fn benchmark_f32_convolution() {
-        println!("\n=== Benchmark: f32 Convolution ===");
-
-        for &size in &[10_000, 100_000] {
-            println!("\nSignal size: {}, Kernel size: 101", size);
-
-            let signal_data: Vec<f32> = (0..size).map(|i| (i % 1000) as f32 / 1000.0).collect();
-            let kernel_data: Vec<f32> = (0..101).map(|i| (i as f32 / 100.0).sin()).collect();
-
-            let signal = VectorSimd::from_vec(signal_data.clone());
-            let kernel = VectorSimd::from_vec(kernel_data.clone());
-
-            const ITERATIONS: usize = 10;
-
-            // Benchmark SIMD
-            let start = Instant::now();
-            let mut simd_result = VectorSimd::new();
-            for _ in 0..ITERATIONS {
-                simd_result = signal.convolve(&kernel);
-            }
-            let simd_time = start.elapsed() / ITERATIONS as u32;
-            std::hint::black_box(&simd_result);
-
-            // Benchmark Scalar
-            let start = Instant::now();
-            let mut scalar_result = Vec::new();
-            for _ in 0..ITERATIONS {
-                scalar_result = scalar_convolve_f32(&signal_data, &kernel_data);
-            }
-            let scalar_time = start.elapsed() / ITERATIONS as u32;
-            std::hint::black_box(&scalar_result);
-
-            let speedup = scalar_time.as_nanos() as f64 / simd_time.as_nanos() as f64;
-
-            println!("  SIMD:   {:?}", simd_time);
-            println!("  Scalar: {:?}", scalar_time);
-            println!("  Speedup: {:.2}x", speedup);
+    /// Runs AVX-512 backend checks when the current test CPU supports it.
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    fn assert_avx512_backend_matches_reference(len: usize) {
+        if std::is_x86_feature_detected!("avx512f") {
+            assert_backend_matches_reference::<x86::Avx512Backend>(len);
         }
     }
 
-    /// Non-vectorizable scalar complex multiplication
-    #[inline(never)]
-    fn scalar_complex_mul_no_vec(a: &[Complex<f32>], b: &[Complex<f32>]) -> Vec<Complex<f32>> {
-        let mut result = Vec::with_capacity(a.len());
-        for i in 0..a.len() {
-            result.push(std::hint::black_box(a[i] * b[i]));
-        }
-        result
+    /// Returns block lengths around and across the selected lane width.
+    fn test_lengths() -> Vec<usize> {
+        vec![0, 1, IQ_LANES.saturating_sub(1), IQ_LANES, IQ_LANES + 1, IQ_LANES * 3 + 2, 31]
     }
 
-    /// Non-vectorizable scalar complex addition
-    #[inline(never)]
-    fn scalar_complex_add_no_vec(a: &[Complex<f32>], b: &[Complex<f32>]) -> Vec<Complex<f32>> {
-        let mut result = Vec::with_capacity(a.len());
-        for i in 0..a.len() {
-            result.push(std::hint::black_box(a[i] + b[i]));
-        }
-        result
+    /// Builds deterministic IQ samples for tests.
+    fn make_iq(len: usize, offset: f32) -> Vec<Complex<f32>> {
+        (0..len)
+            .map(|index| {
+                let value = index as f32 + offset;
+                Complex::new(value.sin() * 0.5, value.cos() * -0.25)
+            })
+            .collect()
     }
 
-    #[test]
-    fn benchmark_complex32_addition() {
-        println!("\n=== Benchmark: Complex32 Addition ===");
+    /// Builds zeroed IQ samples for tests.
+    fn zero_iq(len: usize) -> Vec<Complex<f32>> {
+        vec![Complex::new(0.0, 0.0); len]
+    }
 
-        for &size in &[1_000_000] {
-            println!("\nVector size: {}", size);
-
-            let data_a: Vec<Complex<f32>> = (0..size)
-                .map(|i| Complex::new((i % 100) as f32 / 100.0, ((i * 3) % 100) as f32 / 100.0))
-                .collect();
-            let data_b: Vec<Complex<f32>> = (0..size)
-                .map(|i| Complex::new(((i * 7) % 100) as f32 / 100.0, ((i * 11) % 100) as f32 / 100.0))
-                .collect();
-
-            let vec_a = VectorSimd::from_vec(data_a.clone());
-            let vec_b = VectorSimd::from_vec(data_b.clone());
-
-            const ITERATIONS: usize = 10;
-
-            // Benchmark SIMD
-            let start = Instant::now();
-            let mut simd_result = VectorSimd::new();
-            for _ in 0..ITERATIONS {
-                simd_result = &vec_a + &vec_b;
-            }
-            let simd_time = start.elapsed() / ITERATIONS as u32;
-            std::hint::black_box(&simd_result);
-
-            // Benchmark Auto-vectorized Scalar
-            let start = Instant::now();
-            let mut auto_result = Vec::new();
-            for _ in 0..ITERATIONS {
-                auto_result = data_a.iter().zip(data_b.iter()).map(|(a, b)| a + b).collect();
-            }
-            let auto_time = start.elapsed() / ITERATIONS as u32;
-            std::hint::black_box(&auto_result);
-
-            // Benchmark Non-vectorized Scalar
-            let start = Instant::now();
-            let mut novec_result = Vec::new();
-            for _ in 0..ITERATIONS {
-                novec_result = scalar_complex_add_no_vec(&data_a, &data_b);
-            }
-            let novec_time = start.elapsed() / ITERATIONS as u32;
-            std::hint::black_box(&novec_result);
-
-            let speedup_auto = auto_time.as_nanos() as f64 / simd_time.as_nanos() as f64;
-            let speedup_novec = novec_time.as_nanos() as f64 / simd_time.as_nanos() as f64;
-
-            println!("  SIMD:             {:?}", simd_time);
-            println!("  Scalar (auto-vec): {:?}", auto_time);
-            println!("  Scalar (no-vec):   {:?}", novec_time);
-            println!("  SIMD vs Auto-vec:  {:.2}x", speedup_auto);
-            println!("  SIMD vs No-vec:    {:.2}x", speedup_novec);
+    /// Applies a frequency shifter through uneven block sizes.
+    fn shift_in_chunks(samples: &mut [Complex<f32>]) {
+        let mut shifter = FrequencyShifter::new(12_500.0, 1_000_000.0);
+        for chunk in samples.chunks_mut(11) {
+            shifter.process_block(chunk);
         }
     }
 
-    #[test]
-    fn benchmark_complex32_multiplication() {
-        println!("\n=== Benchmark: Complex32 Multiplication ===");
-
-        for &size in &[1_000_000] {
-            println!("\nVector size: {}", size);
-
-            let data_a: Vec<Complex<f32>> = (0..size)
-                .map(|i| Complex::new((i % 100) as f32 / 100.0, ((i * 3) % 100) as f32 / 100.0))
-                .collect();
-            let data_b: Vec<Complex<f32>> = (0..size)
-                .map(|i| Complex::new(((i * 7) % 100) as f32 / 100.0, ((i * 11) % 100) as f32 / 100.0))
-                .collect();
-
-            let vec_a = VectorSimd::from_vec(data_a.clone());
-            let vec_b = VectorSimd::from_vec(data_b.clone());
-
-            const ITERATIONS: usize = 10;
-
-            // Benchmark SIMD
-            let start = Instant::now();
-            let mut simd_result = VectorSimd::new();
-            for _ in 0..ITERATIONS {
-                simd_result = &vec_a * &vec_b;
-            }
-            let simd_time = start.elapsed() / ITERATIONS as u32;
-            std::hint::black_box(&simd_result);
-
-            // Benchmark Auto-vectorized Scalar
-            let start = Instant::now();
-            let mut auto_result = Vec::new();
-            for _ in 0..ITERATIONS {
-                auto_result = data_a.iter().zip(data_b.iter()).map(|(a, b)| a * b).collect();
-            }
-            let auto_time = start.elapsed() / ITERATIONS as u32;
-            std::hint::black_box(&auto_result);
-
-            // Benchmark Non-vectorized Scalar
-            let start = Instant::now();
-            let mut novec_result = Vec::new();
-            for _ in 0..ITERATIONS {
-                novec_result = scalar_complex_mul_no_vec(&data_a, &data_b);
-            }
-            let novec_time = start.elapsed() / ITERATIONS as u32;
-            std::hint::black_box(&novec_result);
-
-            let speedup_auto = auto_time.as_nanos() as f64 / simd_time.as_nanos() as f64;
-            let speedup_novec = novec_time.as_nanos() as f64 / simd_time.as_nanos() as f64;
-
-            println!("  SIMD:             {:?}", simd_time);
-            println!("  Scalar (auto-vec): {:?}", auto_time);
-            println!("  Scalar (no-vec):   {:?}", novec_time);
-            println!("  SIMD vs Auto-vec:  {:.2}x", speedup_auto);
-            println!("  SIMD vs No-vec:    {:.2}x", speedup_novec);
+    /// Applies a FIR filter through uneven block sizes.
+    fn fir_in_chunks(input: &[Complex<f32>], output: &mut [Complex<f32>], taps: Vec<Complex<f32>>) {
+        let mut filter = FirFilter::new(taps);
+        for (input_chunk, output_chunk) in input.chunks(13).zip(output.chunks_mut(13)) {
+            filter.process_block_to(input_chunk, output_chunk);
         }
     }
 
-    #[test]
-    fn benchmark_complex32_division() {
-        println!("\n=== Benchmark: Complex32 Division ===");
-
-        for &size in &[1_000_000] {
-            println!("\nVector size: {}", size);
-
-            let data_a: Vec<Complex<f32>> = (0..size)
-                .map(|i| Complex::new((i % 100) as f32 / 100.0 + 1.0, ((i * 3) % 100) as f32 / 100.0 + 1.0))
-                .collect();
-            let data_b: Vec<Complex<f32>> = (0..size)
-                .map(|i| Complex::new(((i * 7) % 100) as f32 / 100.0 + 1.0, ((i * 11) % 100) as f32 / 100.0 + 1.0))
-                .collect();
-
-            let vec_a = VectorSimd::from_vec(data_a.clone());
-            let vec_b = VectorSimd::from_vec(data_b.clone());
-
-            const ITERATIONS: usize = 10;
-
-            // Benchmark SIMD
-            let start = Instant::now();
-            let mut simd_result = VectorSimd::new();
-            for _ in 0..ITERATIONS {
-                simd_result = &vec_a / &vec_b;
-            }
-            let simd_time = start.elapsed() / ITERATIONS as u32;
-            std::hint::black_box(&simd_result);
-
-            // Benchmark Scalar
-            let start = Instant::now();
-            let mut scalar_result = Vec::new();
-            for _ in 0..ITERATIONS {
-                scalar_result = data_a.iter().zip(data_b.iter()).map(|(a, b)| a / b).collect();
-            }
-            let scalar_time = start.elapsed() / ITERATIONS as u32;
-            std::hint::black_box(&scalar_result);
-
-            let speedup = scalar_time.as_nanos() as f64 / simd_time.as_nanos() as f64;
-
-            println!("  SIMD:   {:?}", simd_time);
-            println!("  Scalar: {:?}", scalar_time);
-            println!("  Speedup: {:.2}x", speedup);
+    /// Asserts two complex slices are close.
+    fn assert_complex_slices_close(actual: &[Complex<f32>], expected: &[Complex<f32>], epsilon: f32) {
+        assert_eq!(actual.len(), expected.len());
+        for (actual_sample, expected_sample) in actual.iter().zip(expected.iter()) {
+            assert_close(actual_sample.re, expected_sample.re, epsilon);
+            assert_close(actual_sample.im, expected_sample.im, epsilon);
         }
     }
 
-    #[test]
-    fn benchmark_complex32_convolution() {
-        println!("\n=== Benchmark: Complex32 Convolution ===");
-
-        for &size in &[1_000_000] {
-            println!("\nSignal size: {}, Kernel size: 101", size);
-
-            let signal_data: Vec<Complex<f32>> = (0..size)
-                .map(|i| Complex::new((i % 1000) as f32 / 1000.0, ((i * 3) % 1000) as f32 / 1000.0))
-                .collect();
-            let kernel_data: Vec<Complex<f32>> = (0..101)
-                .map(|i| Complex::new((i as f32 / 100.0).sin(), (i as f32 / 100.0).cos()))
-                .collect();
-
-            let signal = VectorSimd::from_vec(signal_data.clone());
-            let kernel = VectorSimd::from_vec(kernel_data.clone());
-
-            const ITERATIONS: usize = 10;
-
-            // Benchmark SIMD
-            let start = Instant::now();
-            let mut simd_result = VectorSimd::new();
-            for _ in 0..ITERATIONS {
-                simd_result = signal.convolve(&kernel);
-            }
-            let simd_time = start.elapsed() / ITERATIONS as u32;
-            std::hint::black_box(&simd_result);
-
-            // Benchmark Scalar
-            let start = Instant::now();
-            let mut scalar_result = Vec::new();
-            for _ in 0..ITERATIONS {
-                let output_size = signal_data.len() - kernel_data.len() + 1;
-                let mut result = vec![Complex::new(0.0, 0.0); output_size];
-                for i in 0..output_size {
-                    let mut sum = Complex::new(0.0, 0.0);
-                    for j in 0..kernel_data.len() {
-                        sum += signal_data[i + j] * kernel_data[j];
-                    }
-                    result[i] = sum;
-                }
-                scalar_result = result;
-            }
-            let scalar_time = start.elapsed() / ITERATIONS as u32;
-            std::hint::black_box(&scalar_result);
-
-            let speedup = scalar_time.as_nanos() as f64 / simd_time.as_nanos() as f64;
-
-            println!("  SIMD:   {:?}", simd_time);
-            println!("  Scalar: {:?}", scalar_time);
-            println!("  Speedup: {:.2}x", speedup);
+    /// Asserts two f32 slices are close.
+    fn assert_slices_close(actual: &[f32], expected: &[f32], epsilon: f32) {
+        assert_eq!(actual.len(), expected.len());
+        for (actual_value, expected_value) in actual.iter().zip(expected.iter()) {
+            assert_close(*actual_value, *expected_value, epsilon);
         }
     }
 
-    #[test]
-    fn benchmark_detailed_comparison() {
-        println!("\n=== Detailed Performance Analysis ===");
-        println!("\nComparing SIMD vs Auto-Vectorized Scalar vs Non-Vectorized Scalar");
-        println!("Vector size: 100,000 elements\n");
-
-        const SIZE: usize = 1_000_000;
-        const ITERATIONS: usize = 10;
-
-        let data_a: Vec<f32> = (0..SIZE).map(|i| (i % 1000) as f32 / 1000.0).collect();
-        let data_b: Vec<f32> = (0..SIZE).map(|i| ((i * 7) % 1000) as f32 / 1000.0).collect();
-        let vec_a = VectorSimd::from_vec(data_a.clone());
-        let vec_b = VectorSimd::from_vec(data_b.clone());
-
-        // === ADDITION ===
-        println!("Addition (+):");
-
-        // SIMD
-        let start = Instant::now();
-        let mut simd_result = VectorSimd::new();
-        for _ in 0..ITERATIONS {
-            simd_result = &vec_a + &vec_b;
-        }
-        let simd_time = start.elapsed() / ITERATIONS as u32;
-        std::hint::black_box(&simd_result);
-
-        // Auto-vectorized scalar
-        let start = Instant::now();
-        let mut auto_result = Vec::new();
-        for _ in 0..ITERATIONS {
-            auto_result = scalar_add_f32(&data_a, &data_b);
-        }
-        let auto_time = start.elapsed() / ITERATIONS as u32;
-        std::hint::black_box(&auto_result);
-
-        // Non-vectorized scalar
-        let start = Instant::now();
-        let mut novec_result = Vec::new();
-        for _ in 0..ITERATIONS {
-            novec_result = scalar_add_f32_no_vec(&data_a, &data_b);
-        }
-        let novec_time = start.elapsed() / ITERATIONS as u32;
-        std::hint::black_box(&novec_result);
-
-        println!("  SIMD (explicit):        {:?}", simd_time);
-        println!("  Scalar (auto-vec):      {:?}", auto_time);
-        println!("  Scalar (no-vec):        {:?}", novec_time);
-        println!("  SIMD vs Auto-vec:       {:.2}x", auto_time.as_nanos() as f64 / simd_time.as_nanos() as f64);
-        println!("  SIMD vs No-vec:         {:.2}x", novec_time.as_nanos() as f64 / simd_time.as_nanos() as f64);
-
-        // === MULTIPLICATION ===
-        println!("\nMultiplication (*):");
-
-        let start = Instant::now();
-        let mut simd_result = VectorSimd::new();
-        for _ in 0..ITERATIONS {
-            simd_result = &vec_a * &vec_b;
-        }
-        let simd_time = start.elapsed() / ITERATIONS as u32;
-        std::hint::black_box(&simd_result);
-
-        let start = Instant::now();
-        let mut auto_result = Vec::new();
-        for _ in 0..ITERATIONS {
-            auto_result = scalar_mul_f32(&data_a, &data_b);
-        }
-        let auto_time = start.elapsed() / ITERATIONS as u32;
-        std::hint::black_box(&auto_result);
-
-        let start = Instant::now();
-        let mut novec_result = Vec::new();
-        for _ in 0..ITERATIONS {
-            novec_result = scalar_mul_f32_no_vec(&data_a, &data_b);
-        }
-        let novec_time = start.elapsed() / ITERATIONS as u32;
-        std::hint::black_box(&novec_result);
-
-        println!("  SIMD (explicit):        {:?}", simd_time);
-        println!("  Scalar (auto-vec):      {:?}", auto_time);
-        println!("  Scalar (no-vec):        {:?}", novec_time);
-        println!("  SIMD vs Auto-vec:       {:.2}x", auto_time.as_nanos() as f64 / simd_time.as_nanos() as f64);
-        println!("  SIMD vs No-vec:         {:.2}x", novec_time.as_nanos() as f64 / simd_time.as_nanos() as f64);
-
-        println!("\n════════════════════════════════════════════════");
-        println!("Key Insight:");
-        println!("If SIMD beats auto-vec but loses to no-vec, the issue is memory allocation.");
-        println!("If SIMD beats no-vec significantly, explicit SIMD is working correctly!");
-        println!("════════════════════════════════════════════════\n");
-    }
-
-    #[test]
-    fn benchmark_summary() {
-        println!("\n");
-        println!("╔════════════════════════════════════════════════════════════════╗");
-        println!("║           SIMD Performance Benchmark Summary                   ║");
-        println!("╠════════════════════════════════════════════════════════════════╣");
-        println!("║ Configuration: 128-bit registers (f32x4, f64x2)                ║");
-        println!("║                                                                 ║");
-        println!("║ Performance vs Non-Vectorized Baseline:                        ║");
-        println!("║   - f32 operations: 2.6x - 5.5x (explicit SIMD)                ║");
-        println!("║   - f64 operations: ~2x (explicit SIMD)                        ║");
-        println!("║   - Complex32:      1.3x - 2.4x (auto-vectorization)           ║");
-        println!("║                                                                 ║");
-        println!("║ Key Insights:                                                  ║");
-        println!("║   - Explicit SIMD wins for f32/f64 arithmetic                  ║");
-        println!("║   - Complex ops benefit more from allocation optimization      ║");
-        println!("║   - LLVM auto-vectorization is excellent for simple ops        ║");
-        println!("║   - Memory allocation matters more than SIMD instructions      ║");
-        println!("║                                                                 ║");
-        println!("║ To use 256-bit registers:                                      ║");
-        println!("║   Change simd_config::F32Batch from f32x4 → f32x8             ║");
-        println!("║   Expected speedup: ~6-8x for f32 operations                   ║");
-        println!("╚════════════════════════════════════════════════════════════════╝");
-        println!();
+    /// Asserts two f32 values are close.
+    fn assert_close(actual: f32, expected: f32, epsilon: f32) {
+        assert!(
+            (actual - expected).abs() <= epsilon,
+            "actual {actual} expected {expected} epsilon {epsilon}"
+        );
     }
 }
