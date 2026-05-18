@@ -58,7 +58,7 @@ check_venv_activated() {
         echo "  source $VENV_DIR/bin/activate"
         echo ""
         echo "Or skip this check with:"
-        echo "  SKIP_VENV_CHECK=true ./scripts/build_and_test_release.sh"
+        echo "  SKIP_VENV_CHECK=true ./scripts/build_and_test_python_release.sh"
         exit 1
     fi
 
@@ -122,7 +122,7 @@ build_wheels() {
     print_info "This may take a minute or two on first build"
     echo ""
 
-    if ! maturin build --release; then
+    if ! maturin build --release --out "$BUILD_DIR"; then
         print_error "Wheel build failed"
         exit 1
     fi
@@ -261,7 +261,7 @@ print_summary() {
 # Print usage information
 print_usage() {
     cat << 'EOF'
-Usage: ./scripts/build_and_test_release.sh [VENV_DIR]
+Usage: ./scripts/build_and_test_python_release.sh [VENV_DIR]
 
 Build optimized release wheels and run the test suite.
 
@@ -273,13 +273,13 @@ Environment Variables:
 
 Examples:
   # Standard usage (with .venv)
-  ./scripts/build_and_test_release.sh
+  ./scripts/build_and_test_python_release.sh
 
   # Use custom venv
-  ./scripts/build_and_test_release.sh ~/my_signal_kit_env
+  ./scripts/build_and_test_python_release.sh ~/my_signal_kit_env
 
   # Skip venv check (for CI/CD)
-  SKIP_VENV_CHECK=true ./scripts/build_and_test_release.sh
+  SKIP_VENV_CHECK=true ./scripts/build_and_test_python_release.sh
 
 Features:
   ✓ Checks for required tools (maturin, pytest)

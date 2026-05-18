@@ -22,9 +22,6 @@ pub use mod_type::ModType;
 // Re-export commonly used items from submodules
 pub use generate::{Carrier, Channel};
 
-#[cfg(feature = "python")]
-use pyo3::prelude::*;
-
 // Plot module only available in tests
 #[cfg(test)]
 pub mod plot;

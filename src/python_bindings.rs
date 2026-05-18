@@ -6,7 +6,7 @@ use numpy::{PyArray1, IntoPyArray, PyReadonlyArray1};
 use num_complex::Complex;
 use crate::{Carrier, Channel, ModType};
 use crate::generate::Impairment;
-use crate::spectrum::{welch as welch_impl, WindowType, AveragingMethod};
+use crate::spectrum::{welch as welch_impl, WindowType};
 
 /// Helper function to parse modulation type from string
 ///
@@ -422,7 +422,7 @@ impl PythonChannel {
     /// Example:
     ///     >>> channel.add_impairment("digitizer_droop_ad9361")
     ///     >>> channel.add_impairment({"type": "frequency_variation", "amplitude_db": 1.0, "cycles": 3.0})
-    fn add_impairment(&mut self, py: Python, impairment: &Bound<PyAny>) -> PyResult<()> {
+    fn add_impairment(&mut self, _py: Python, impairment: &Bound<PyAny>) -> PyResult<()> {
         let imp = parse_impairment(impairment)?;
         self.inner.add_impairment(imp);
         Ok(())
@@ -445,6 +445,65 @@ fn parse_window_type(window_str: &str) -> PyResult<WindowType> {
     }
 }
 
+/// Validate Welch parameters before calling the Rust implementation.
+fn validate_welch_parameters(
+    sample_rate: f64,
+    nperseg: usize,
+    noverlap: Option<usize>,
+    nfft: Option<usize>,
+) -> PyResult<()> {
+    validate_welch_nperseg(nperseg)?;
+    validate_welch_sample_rate(sample_rate)?;
+    validate_welch_overlap(nperseg, noverlap)?;
+    validate_welch_nfft(nperseg, nfft)?;
+
+    Ok(())
+}
+
+/// Validate that the Welch segment length can form segments.
+fn validate_welch_nperseg(nperseg: usize) -> PyResult<()> {
+    if nperseg == 0 {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "nperseg must be greater than 0",
+        ));
+    }
+
+    Ok(())
+}
+
+/// Validate that the Welch sample rate is positive.
+fn validate_welch_sample_rate(sample_rate: f64) -> PyResult<()> {
+    if sample_rate <= 0.0 {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "sample_rate must be positive",
+        ));
+    }
+
+    Ok(())
+}
+
+/// Validate that Welch overlap leaves forward progress between segments.
+fn validate_welch_overlap(nperseg: usize, noverlap: Option<usize>) -> PyResult<()> {
+    if noverlap.unwrap_or(nperseg / 2) >= nperseg {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "noverlap must be less than nperseg",
+        ));
+    }
+
+    Ok(())
+}
+
+/// Validate that the Welch FFT length does not truncate segments.
+fn validate_welch_nfft(nperseg: usize, nfft: Option<usize>) -> PyResult<()> {
+    if nfft.unwrap_or(nperseg) < nperseg {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "nfft must be greater than or equal to nperseg",
+        ));
+    }
+
+    Ok(())
+}
+
 /// Welch's method for power spectral density estimation
 ///
 /// Estimates the power spectral density by dividing the signal into overlapping
@@ -460,7 +519,8 @@ fn parse_window_type(window_str: &str) -> PyResult<WindowType> {
 ///
 /// Returns:
 ///     tuple: (frequencies, psd) where both are numpy arrays (float64)
-///            frequencies are in Hz from -fs/2 to +fs/2
+///            frequencies are centered FFT bins spaced by sample_rate / nfft;
+///            for even nfft, the last bin is +fs/2 - df
 ///            psd is in power/Hz
 ///
 /// Example:
@@ -479,18 +539,7 @@ fn welch(
     nfft: Option<usize>,
     window: &str,
 ) -> PyResult<(Py<PyArray1<f64>>, Py<PyArray1<f64>>)> {
-    // Validate parameters
-    if nperseg == 0 {
-        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "nperseg must be greater than 0",
-        ));
-    }
-    if sample_rate <= 0.0 {
-        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "sample_rate must be positive",
-        ));
-    }
-
+    validate_welch_parameters(sample_rate, nperseg, noverlap, nfft)?;
     let window_type = parse_window_type(window)?;
 
     // Extract signal from numpy array

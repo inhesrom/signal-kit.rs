@@ -740,14 +740,14 @@ mod tests {
             Complex::new(1.0, 1.0),
             Complex::new(2.0, 0.0),
         ]);
-        
+
         // Test owned multiplication
         let c = a.clone() * b.clone();
         // (2+i)(1+i) = 2 + 2i + i + i^2 = 2 + 3i - 1 = 1 + 3i
         assert_eq!(c[0], Complex::new(1.0, 3.0));
         // (3+2i)(2+0i) = 6 + 4i
         assert_eq!(c[1], Complex::new(6.0, 4.0));
-        
+
         // Test borrowed multiplication
         let d = &a * &b;
         assert_eq!(d[0], Complex::new(1.0, 3.0));
@@ -761,24 +761,24 @@ mod tests {
             Complex::new(3.0, 4.0),
         ]);
         let scalar = Complex::new(2.0, 1.0);
-        
+
         // Test vec * scalar (owned)
         let result1 = vec.clone() * scalar;
         // (1+2i)(2+i) = 2 + i + 4i + 2i^2 = 2 + 5i - 2 = 0 + 5i
         assert_eq!(result1[0], Complex::new(0.0, 5.0));
         // (3+4i)(2+i) = 6 + 3i + 8i + 4i^2 = 6 + 11i - 4 = 2 + 11i
         assert_eq!(result1[1], Complex::new(2.0, 11.0));
-        
+
         // Test &vec * scalar (borrowed)
         let result2 = &vec * scalar;
         assert_eq!(result2[0], Complex::new(0.0, 5.0));
         assert_eq!(result2[1], Complex::new(2.0, 11.0));
-        
+
         // Test scalar * vec (commutative, owned)
         let result3 = scalar * vec.clone();
         assert_eq!(result3[0], Complex::new(0.0, 5.0));
         assert_eq!(result3[1], Complex::new(2.0, 11.0));
-        
+
         // Test scalar * &vec (commutative, borrowed)
         let result4 = scalar * &vec;
         assert_eq!(result4[0], Complex::new(0.0, 5.0));
@@ -792,22 +792,22 @@ mod tests {
             Complex::new(3.0_f64, 4.0_f64),
         ]);
         let scalar = 2.5_f64;
-        
+
         // Test vec * scalar (owned)
         let result1 = vec.clone() * scalar;
         assert_eq!(result1[0], Complex::new(2.5, 5.0));
         assert_eq!(result1[1], Complex::new(7.5, 10.0));
-        
+
         // Test &vec * scalar (borrowed)
         let result2 = &vec * scalar;
         assert_eq!(result2[0], Complex::new(2.5, 5.0));
         assert_eq!(result2[1], Complex::new(7.5, 10.0));
-        
+
         // Test scalar * vec (commutative, owned)
         let result3 = scalar * vec.clone();
         assert_eq!(result3[0], Complex::new(2.5, 5.0));
         assert_eq!(result3[1], Complex::new(7.5, 10.0));
-        
+
         // Test scalar * &vec (commutative, borrowed)
         let result4 = scalar * &vec;
         assert_eq!(result4[0], Complex::new(2.5, 5.0));
@@ -821,22 +821,22 @@ mod tests {
             Complex::new(3.0_f32, 4.0_f32),
         ]);
         let scalar = 2.5_f32;
-        
+
         // Test vec * scalar (owned)
         let result1 = vec.clone() * scalar;
         assert_eq!(result1[0], Complex::new(2.5, 5.0));
         assert_eq!(result1[1], Complex::new(7.5, 10.0));
-        
+
         // Test &vec * scalar (borrowed)
         let result2 = &vec * scalar;
         assert_eq!(result2[0], Complex::new(2.5, 5.0));
         assert_eq!(result2[1], Complex::new(7.5, 10.0));
-        
+
         // Test scalar * vec (commutative, owned)
         let result3 = scalar * vec.clone();
         assert_eq!(result3[0], Complex::new(2.5, 5.0));
         assert_eq!(result3[1], Complex::new(7.5, 10.0));
-        
+
         // Test scalar * &vec (commutative, borrowed)
         let result4 = scalar * &vec;
         assert_eq!(result4[0], Complex::new(2.5, 5.0));
