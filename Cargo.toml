@@ -20,8 +20,13 @@ pyo3 = { version = "0.22", features = ["extension-module"], optional = true }
 numpy = { version = "0.22", optional = true }
 
 [dev-dependencies]
+criterion = { version = "0.8", features = ["html_reports"] }
 plotly = "0.13"
 
 [features]
 default = []
 python = ["pyo3", "numpy"]
+
+[[bench]]
+name = "vector_simd"
+harness = false

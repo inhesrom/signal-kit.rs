@@ -103,6 +103,26 @@ impl IqVectorPlan {
     pub fn magnitude_to(self, input: &[Complex<f32>], output: &mut [f32]) {
         magnitude_to(input, output);
     }
+
+    /// Writes the full direct IQ convolution into `output` without allocating.
+    ///
+    /// # Panics
+    /// Panics when `input` or `kernel` is empty, or when `output.len()` is not
+    /// `input.len() + kernel.len() - 1`.
+    pub fn iq_convolve_full_to(self, input: &[Complex<f32>], kernel: &[Complex<f32>], output: &mut [Complex<f32>]) {
+        iq_convolve_full_to(input, kernel, output);
+    }
+
+    /// Writes a direct IQ convolution range into `output` without allocating.
+    pub(crate) fn iq_convolve_range_to(
+        self,
+        input: &[Complex<f32>],
+        kernel: &[Complex<f32>],
+        full_output_start: usize,
+        output: &mut [Complex<f32>],
+    ) {
+        iq_convolve_range_to(input, kernel, full_output_start, output);
+    }
 }
 
 impl Default for IqVectorPlan {
@@ -175,6 +195,22 @@ pub fn iq_power_sum(input: &[Complex<f32>]) -> f32 {
 pub fn magnitude_to(input: &[Complex<f32>], output: &mut [f32]) {
     assert_output_len(input.len(), output.len(), "magnitude output");
     SelectedBackend::magnitude_to(input, output);
+}
+
+/// Writes the full direct IQ convolution into `output` without allocating.
+///
+/// # Panics
+/// Panics when `input` or `kernel` is empty, or when `output.len()` is not
+/// `input.len() + kernel.len() - 1`.
+pub fn iq_convolve_full_to(input: &[Complex<f32>], kernel: &[Complex<f32>], output: &mut [Complex<f32>]) {
+    assert_full_convolution_output_len(input, kernel, output);
+    SelectedBackend::iq_convolve_range_to(input, kernel, 0, output);
+}
+
+/// Writes a direct IQ convolution range from the full output into `output`.
+pub(crate) fn iq_convolve_range_to(input: &[Complex<f32>], kernel: &[Complex<f32>], full_output_start: usize, output: &mut [Complex<f32>]) {
+    assert_convolution_range(input, kernel, full_output_start, output.len());
+    SelectedBackend::iq_convolve_range_to(input, kernel, full_output_start, output);
 }
 
 /// Frequency shifts IQ blocks while preserving phase across calls.
@@ -297,6 +333,9 @@ trait IqBackend {
 
     /// Writes per-sample magnitudes into `output`.
     fn magnitude_to(input: &[Complex<f32>], output: &mut [f32]);
+
+    /// Writes a direct IQ convolution range into `output`.
+    fn iq_convolve_range_to(input: &[Complex<f32>], kernel: &[Complex<f32>], full_output_start: usize, output: &mut [Complex<f32>]);
 }
 
 /// Returns the build-selected backend as a const value.
@@ -331,6 +370,98 @@ fn assert_equal_len<T, U>(left: &[T], right: &[U], left_name: &str, right_name: 
 /// Asserts that an output length matches the expected length.
 fn assert_output_len(expected: usize, actual: usize, output_name: &str) {
     assert_eq!(expected, actual, "{output_name} length must match input length");
+}
+
+/// Asserts that the full convolution output length is exact.
+fn assert_full_convolution_output_len(input: &[Complex<f32>], kernel: &[Complex<f32>], output: &[Complex<f32>]) {
+    let expected = full_convolution_len(input.len(), kernel.len());
+    assert_eq!(
+        expected,
+        output.len(),
+        "full convolution output length must equal input.len() + kernel.len() - 1"
+    );
+}
+
+/// Asserts that a convolution range fits inside the full output.
+fn assert_convolution_range(input: &[Complex<f32>], kernel: &[Complex<f32>], full_output_start: usize, output_len: usize) {
+    let full_len = full_convolution_len(input.len(), kernel.len());
+    let range_end = full_output_start
+        .checked_add(output_len)
+        .expect("convolution output range length overflowed");
+    assert!(range_end <= full_len, "convolution output range must fit within full output");
+}
+
+/// Returns the full convolution output length.
+fn full_convolution_len(input_len: usize, kernel_len: usize) -> usize {
+    assert!(input_len > 0, "input must not be empty");
+    assert!(kernel_len > 0, "kernel must not be empty");
+    input_len
+        .checked_add(kernel_len)
+        .and_then(|length| length.checked_sub(1))
+        .expect("full convolution length overflowed")
+}
+
+/// Writes each requested convolution output using an overlap summation function.
+fn write_convolution_range_to<SumOverlap>(
+    input: &[Complex<f32>],
+    kernel: &[Complex<f32>],
+    full_output_start: usize,
+    output: &mut [Complex<f32>],
+    mut sum_overlap: SumOverlap,
+) where
+    SumOverlap: FnMut(&[Complex<f32>], &[Complex<f32>]) -> Complex<f32>,
+{
+    for (output_offset, output_sample) in output.iter_mut().enumerate() {
+        let full_output_index = full_output_start + output_offset;
+        let (input_overlap, kernel_overlap) = convolution_overlap_slices(input, kernel, full_output_index);
+        *output_sample = sum_overlap(input_overlap, kernel_overlap);
+    }
+}
+
+/// Returns the overlapping input and kernel slices for one full output index.
+fn convolution_overlap_slices<'input, 'kernel>(
+    input: &'input [Complex<f32>],
+    kernel: &'kernel [Complex<f32>],
+    full_index: usize,
+) -> (&'input [Complex<f32>], &'kernel [Complex<f32>]) {
+    let overlap = convolution_overlap(full_index, input.len(), kernel.len());
+    let input_end = overlap.input_start + overlap.len;
+    let kernel_end = overlap.kernel_start + overlap.len;
+    (&input[overlap.input_start..input_end], &kernel[overlap.kernel_start..kernel_end])
+}
+
+/// Returns the overlap geometry for one full convolution output index.
+fn convolution_overlap(full_index: usize, input_len: usize, kernel_len: usize) -> ConvolutionOverlap {
+    let kernel_start = (kernel_len - 1).saturating_sub(full_index);
+    let kernel_end = kernel_overlap_end(full_index, input_len, kernel_len);
+    ConvolutionOverlap {
+        input_start: full_index + kernel_start + 1 - kernel_len,
+        kernel_start,
+        len: kernel_end - kernel_start,
+    }
+}
+
+/// Returns the exclusive kernel overlap end for one full output index.
+fn kernel_overlap_end(full_index: usize, input_len: usize, kernel_len: usize) -> usize {
+    let full_len = input_len + kernel_len - 1;
+    kernel_len.min(full_len - full_index)
+}
+
+/// Stores contiguous overlap geometry for direct convolution.
+#[derive(Debug, Clone, Copy)]
+struct ConvolutionOverlap {
+    input_start: usize,
+    kernel_start: usize,
+    len: usize,
+}
+
+/// Sums an interleaved `[re, im, ...]` slice into one complex value.
+fn sum_interleaved_complex_lanes(values: &[f32]) -> Complex<f32> {
+    let mut sum = Complex::new(0.0, 0.0);
+    for lane in values.chunks_exact(2) {
+        sum += Complex::new(lane[0], lane[1]);
+    }
+    sum
 }
 
 /// Casts complex f32 samples to their interleaved f32 representation.
@@ -395,6 +526,10 @@ mod scalar {
         fn magnitude_to(input: &[Complex<f32>], output: &mut [f32]) {
             magnitude_to(input, output);
         }
+
+        fn iq_convolve_range_to(input: &[Complex<f32>], kernel: &[Complex<f32>], full_output_start: usize, output: &mut [Complex<f32>]) {
+            iq_convolve_range_to(input, kernel, full_output_start, output);
+        }
     }
 
     /// Writes scalar complex additions into `output`.
@@ -444,6 +579,13 @@ mod scalar {
         }
     }
 
+    /// Writes scalar direct convolution outputs into `output`.
+    pub(super) fn iq_convolve_range_to(input: &[Complex<f32>], kernel: &[Complex<f32>], full_output_start: usize, output: &mut [Complex<f32>]) {
+        write_convolution_range_to(input, kernel, full_output_start, output, |input_overlap, kernel_overlap| {
+            mul_sum_tail(input_overlap, kernel_overlap, 0)
+        });
+    }
+
     /// Writes scalar f32 additions from `start` to the end.
     pub(super) fn add_f32_tail(left: &[f32], right: &[f32], output: &mut [f32], start: usize) {
         for index in start..left.len() {
@@ -455,13 +597,6 @@ mod scalar {
     pub(super) fn add_assign_f32_tail(target: &mut [f32], input: &[f32], start: usize) {
         for index in start..target.len() {
             target[index] += input[index];
-        }
-    }
-
-    /// Scales scalar f32 samples from `start` to the end.
-    pub(super) fn scale_f32_tail(target: &mut [f32], scale: f32, start: usize) {
-        for value in target.iter_mut().skip(start) {
-            *value *= scale;
         }
     }
 
@@ -489,6 +624,15 @@ mod scalar {
         for index in start..input.len() {
             output[index] = input[index].norm();
         }
+    }
+
+    /// Returns a scalar sum of complex products from `start` to the end.
+    pub(super) fn mul_sum_tail(left: &[Complex<f32>], right: &[Complex<f32>], start: usize) -> Complex<f32> {
+        let mut sum = Complex::new(0.0, 0.0);
+        for index in start..left.len() {
+            sum += left[index] * right[index];
+        }
+        sum
     }
 }
 
@@ -533,7 +677,7 @@ mod x86 {
         }
 
         fn iq_scale_inplace(target: &mut [Complex<f32>], scale: f32) {
-            unsafe { sse2_iq_scale_inplace(target, scale) };
+            scalar::iq_scale_inplace(target, scale);
         }
 
         fn iq_axpy_inplace(target: &mut [Complex<f32>], scale: Complex<f32>, input: &[Complex<f32>]) {
@@ -551,6 +695,10 @@ mod x86 {
         fn magnitude_to(input: &[Complex<f32>], output: &mut [f32]) {
             unsafe { sse2_magnitude_to(input, output) };
         }
+
+        fn iq_convolve_range_to(input: &[Complex<f32>], kernel: &[Complex<f32>], full_output_start: usize, output: &mut [Complex<f32>]) {
+            unsafe { sse2_iq_convolve_range_to(input, kernel, full_output_start, output) };
+        }
     }
 
     impl IqBackend for Avx2Backend {
@@ -563,7 +711,7 @@ mod x86 {
         }
 
         fn iq_scale_inplace(target: &mut [Complex<f32>], scale: f32) {
-            unsafe { avx2_iq_scale_inplace(target, scale) };
+            scalar::iq_scale_inplace(target, scale);
         }
 
         fn iq_axpy_inplace(target: &mut [Complex<f32>], scale: Complex<f32>, input: &[Complex<f32>]) {
@@ -581,6 +729,10 @@ mod x86 {
         fn magnitude_to(input: &[Complex<f32>], output: &mut [f32]) {
             unsafe { avx2_magnitude_to(input, output) };
         }
+
+        fn iq_convolve_range_to(input: &[Complex<f32>], kernel: &[Complex<f32>], full_output_start: usize, output: &mut [Complex<f32>]) {
+            unsafe { avx2_iq_convolve_range_to(input, kernel, full_output_start, output) };
+        }
     }
 
     impl IqBackend for Avx512Backend {
@@ -593,7 +745,7 @@ mod x86 {
         }
 
         fn iq_scale_inplace(target: &mut [Complex<f32>], scale: f32) {
-            unsafe { avx512_iq_scale_inplace(target, scale) };
+            scalar::iq_scale_inplace(target, scale);
         }
 
         fn iq_axpy_inplace(target: &mut [Complex<f32>], scale: Complex<f32>, input: &[Complex<f32>]) {
@@ -611,6 +763,10 @@ mod x86 {
         fn magnitude_to(input: &[Complex<f32>], output: &mut [f32]) {
             unsafe { avx512_magnitude_to(input, output) };
         }
+
+        fn iq_convolve_range_to(input: &[Complex<f32>], kernel: &[Complex<f32>], full_output_start: usize, output: &mut [Complex<f32>]) {
+            unsafe { avx512_iq_convolve_range_to(input, kernel, full_output_start, output) };
+        }
     }
 
     /// Writes SSE2 f32 additions into `output`.
@@ -625,13 +781,6 @@ mod x86 {
     unsafe fn sse2_iq_add_inplace(target: &mut [Complex<f32>], input: &[Complex<f32>]) {
         let end = unsafe { add_assign_f32_vectors(as_f32_slice_mut(target), as_f32_slice(input)) };
         scalar::add_assign_f32_tail(as_f32_slice_mut(target), as_f32_slice(input), end);
-    }
-
-    /// Scales SSE2 f32 samples in place.
-    #[target_feature(enable = "sse2")]
-    unsafe fn sse2_iq_scale_inplace(target: &mut [Complex<f32>], scale: f32) {
-        let end = unsafe { scale_f32_vectors(as_f32_slice_mut(target), scale) };
-        scalar::scale_f32_tail(as_f32_slice_mut(target), scale, end);
     }
 
     /// Adds SSE2 complex AXPY results into `target`.
@@ -662,6 +811,14 @@ mod x86 {
         scalar::magnitude_tail(input, output, end);
     }
 
+    /// Writes SSE2 direct convolution outputs into `output`.
+    #[target_feature(enable = "sse2")]
+    unsafe fn sse2_iq_convolve_range_to(input: &[Complex<f32>], kernel: &[Complex<f32>], full_output_start: usize, output: &mut [Complex<f32>]) {
+        write_convolution_range_to(input, kernel, full_output_start, output, |input_overlap, kernel_overlap| unsafe {
+            sse2_complex_mul_sum(input_overlap, kernel_overlap)
+        });
+    }
+
     /// Writes AVX2 f32 additions into `output`.
     #[target_feature(enable = "avx2")]
     #[target_feature(enable = "fma")]
@@ -676,14 +833,6 @@ mod x86 {
     unsafe fn avx2_iq_add_inplace(target: &mut [Complex<f32>], input: &[Complex<f32>]) {
         let end = unsafe { avx2_add_assign_f32_vectors(as_f32_slice_mut(target), as_f32_slice(input)) };
         scalar::add_assign_f32_tail(as_f32_slice_mut(target), as_f32_slice(input), end);
-    }
-
-    /// Scales AVX2 f32 samples in place.
-    #[target_feature(enable = "avx2")]
-    #[target_feature(enable = "fma")]
-    unsafe fn avx2_iq_scale_inplace(target: &mut [Complex<f32>], scale: f32) {
-        let end = unsafe { avx2_scale_f32_vectors(as_f32_slice_mut(target), scale) };
-        scalar::scale_f32_tail(as_f32_slice_mut(target), scale, end);
     }
 
     /// Adds AVX2 complex AXPY results into `target`.
@@ -718,6 +867,15 @@ mod x86 {
         scalar::magnitude_tail(input, output, end);
     }
 
+    /// Writes AVX2 direct convolution outputs into `output`.
+    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "fma")]
+    unsafe fn avx2_iq_convolve_range_to(input: &[Complex<f32>], kernel: &[Complex<f32>], full_output_start: usize, output: &mut [Complex<f32>]) {
+        write_convolution_range_to(input, kernel, full_output_start, output, |input_overlap, kernel_overlap| unsafe {
+            avx2_complex_mul_sum(input_overlap, kernel_overlap)
+        });
+    }
+
     /// Writes AVX-512 f32 additions into `output`.
     #[target_feature(enable = "avx512f")]
     unsafe fn avx512_iq_add_to(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]) {
@@ -730,13 +888,6 @@ mod x86 {
     unsafe fn avx512_iq_add_inplace(target: &mut [Complex<f32>], input: &[Complex<f32>]) {
         let end = unsafe { avx512_add_assign_f32_vectors(as_f32_slice_mut(target), as_f32_slice(input)) };
         scalar::add_assign_f32_tail(as_f32_slice_mut(target), as_f32_slice(input), end);
-    }
-
-    /// Scales AVX-512 f32 samples in place.
-    #[target_feature(enable = "avx512f")]
-    unsafe fn avx512_iq_scale_inplace(target: &mut [Complex<f32>], scale: f32) {
-        let end = unsafe { avx512_scale_f32_vectors(as_f32_slice_mut(target), scale) };
-        scalar::scale_f32_tail(as_f32_slice_mut(target), scale, end);
     }
 
     /// Adds AVX-512 complex AXPY results into `target`.
@@ -767,6 +918,19 @@ mod x86 {
         scalar::magnitude_tail(input, output, end);
     }
 
+    /// Writes AVX-512 direct convolution outputs into `output`.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_iq_convolve_range_to(
+        input: &[Complex<f32>],
+        kernel: &[Complex<f32>],
+        full_output_start: usize,
+        output: &mut [Complex<f32>],
+    ) {
+        write_convolution_range_to(input, kernel, full_output_start, output, |input_overlap, kernel_overlap| unsafe {
+            avx512_complex_mul_sum(input_overlap, kernel_overlap)
+        });
+    }
+
     /// Writes SSE2 f32 additions and returns the processed prefix length.
     #[target_feature(enable = "sse2")]
     unsafe fn add_f32_vectors(left: &[f32], right: &[f32], output: &mut [f32]) -> usize {
@@ -788,20 +952,6 @@ mod x86 {
         while index < end {
             let sum = unsafe { _mm_add_ps(load_sse(target, index), load_sse(input, index)) };
             unsafe { _mm_storeu_ps(target.as_mut_ptr().add(index), sum) };
-            index += SSE_F32_LANES;
-        }
-        end
-    }
-
-    /// Scales SSE2 f32 samples and returns the processed prefix length.
-    #[target_feature(enable = "sse2")]
-    unsafe fn scale_f32_vectors(target: &mut [f32], scale: f32) -> usize {
-        let end = vectorized_end(target.len(), SSE_F32_LANES);
-        let scale_vector = _mm_set1_ps(scale);
-        let mut index = 0;
-        while index < end {
-            let product = unsafe { _mm_mul_ps(load_sse(target, index), scale_vector) };
-            unsafe { _mm_storeu_ps(target.as_mut_ptr().add(index), product) };
             index += SSE_F32_LANES;
         }
         end
@@ -862,6 +1012,29 @@ mod x86 {
         end
     }
 
+    /// Returns the SSE2 sum of pairwise complex products.
+    #[target_feature(enable = "sse2")]
+    unsafe fn sse2_complex_mul_sum(left: &[Complex<f32>], right: &[Complex<f32>]) -> Complex<f32> {
+        let (end, sum) = unsafe { sse2_complex_mul_sum_vectors(left, right) };
+        sum + scalar::mul_sum_tail(left, right, end)
+    }
+
+    /// Returns the SSE2 vector sum and processed complex samples.
+    #[target_feature(enable = "sse2")]
+    unsafe fn sse2_complex_mul_sum_vectors(left: &[Complex<f32>], right: &[Complex<f32>]) -> (usize, Complex<f32>) {
+        let end = vectorized_end(left.len(), SSE_COMPLEX_LANES);
+        let sign = unsafe { load_sse_sign() };
+        let mut accum = _mm_setzero_ps();
+        let mut index = 0;
+        while index < end {
+            let left_vector = unsafe { load_sse(as_f32_slice(left), index * 2) };
+            let right_vector = unsafe { load_sse(as_f32_slice(right), index * 2) };
+            accum = _mm_add_ps(accum, unsafe { complex_mul_sse(left_vector, right_vector, sign) });
+            index += SSE_COMPLEX_LANES;
+        }
+        (end, unsafe { horizontal_complex_sum_sse(accum) })
+    }
+
     /// Writes AVX2 f32 additions and returns the processed prefix length.
     #[target_feature(enable = "avx2")]
     unsafe fn avx2_add_f32_vectors(left: &[f32], right: &[f32], output: &mut [f32]) -> usize {
@@ -883,20 +1056,6 @@ mod x86 {
         while index < end {
             let sum = unsafe { _mm256_add_ps(load_avx2(target, index), load_avx2(input, index)) };
             unsafe { _mm256_storeu_ps(target.as_mut_ptr().add(index), sum) };
-            index += AVX2_F32_LANES;
-        }
-        end
-    }
-
-    /// Scales AVX2 f32 samples and returns the processed prefix length.
-    #[target_feature(enable = "avx2")]
-    unsafe fn avx2_scale_f32_vectors(target: &mut [f32], scale: f32) -> usize {
-        let end = vectorized_end(target.len(), AVX2_F32_LANES);
-        let scale_vector = _mm256_set1_ps(scale);
-        let mut index = 0;
-        while index < end {
-            let product = unsafe { _mm256_mul_ps(load_avx2(target, index), scale_vector) };
-            unsafe { _mm256_storeu_ps(target.as_mut_ptr().add(index), product) };
             index += AVX2_F32_LANES;
         }
         end
@@ -959,6 +1118,31 @@ mod x86 {
         end
     }
 
+    /// Returns the AVX2 sum of pairwise complex products.
+    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "fma")]
+    unsafe fn avx2_complex_mul_sum(left: &[Complex<f32>], right: &[Complex<f32>]) -> Complex<f32> {
+        let (end, sum) = unsafe { avx2_complex_mul_sum_vectors(left, right) };
+        sum + scalar::mul_sum_tail(left, right, end)
+    }
+
+    /// Returns the AVX2 vector sum and processed complex samples.
+    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "fma")]
+    unsafe fn avx2_complex_mul_sum_vectors(left: &[Complex<f32>], right: &[Complex<f32>]) -> (usize, Complex<f32>) {
+        let end = vectorized_end(left.len(), AVX2_COMPLEX_LANES);
+        let sign = unsafe { load_avx2_sign() };
+        let mut accum = _mm256_setzero_ps();
+        let mut index = 0;
+        while index < end {
+            let left_vector = unsafe { load_avx2(as_f32_slice(left), index * 2) };
+            let right_vector = unsafe { load_avx2(as_f32_slice(right), index * 2) };
+            accum = _mm256_add_ps(accum, complex_mul_avx2(left_vector, right_vector, sign));
+            index += AVX2_COMPLEX_LANES;
+        }
+        (end, unsafe { horizontal_complex_sum_avx2(accum) })
+    }
+
     /// Writes AVX-512 f32 additions and returns the processed prefix length.
     #[target_feature(enable = "avx512f")]
     unsafe fn avx512_add_f32_vectors(left: &[f32], right: &[f32], output: &mut [f32]) -> usize {
@@ -980,20 +1164,6 @@ mod x86 {
         while index < end {
             let sum = unsafe { _mm512_add_ps(load_avx512(target, index), load_avx512(input, index)) };
             unsafe { _mm512_storeu_ps(target.as_mut_ptr().add(index), sum) };
-            index += AVX512_F32_LANES;
-        }
-        end
-    }
-
-    /// Scales AVX-512 f32 samples and returns the processed prefix length.
-    #[target_feature(enable = "avx512f")]
-    unsafe fn avx512_scale_f32_vectors(target: &mut [f32], scale: f32) -> usize {
-        let end = vectorized_end(target.len(), AVX512_F32_LANES);
-        let scale_vector = _mm512_set1_ps(scale);
-        let mut index = 0;
-        while index < end {
-            let product = unsafe { _mm512_mul_ps(load_avx512(target, index), scale_vector) };
-            unsafe { _mm512_storeu_ps(target.as_mut_ptr().add(index), product) };
             index += AVX512_F32_LANES;
         }
         end
@@ -1054,6 +1224,29 @@ mod x86 {
         end
     }
 
+    /// Returns the AVX-512 sum of pairwise complex products.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_complex_mul_sum(left: &[Complex<f32>], right: &[Complex<f32>]) -> Complex<f32> {
+        let (end, sum) = unsafe { avx512_complex_mul_sum_vectors(left, right) };
+        sum + scalar::mul_sum_tail(left, right, end)
+    }
+
+    /// Returns the AVX-512 vector sum and processed complex samples.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_complex_mul_sum_vectors(left: &[Complex<f32>], right: &[Complex<f32>]) -> (usize, Complex<f32>) {
+        let end = vectorized_end(left.len(), AVX512_COMPLEX_LANES);
+        let sign = unsafe { load_avx512_sign() };
+        let mut accum = _mm512_setzero_ps();
+        let mut index = 0;
+        while index < end {
+            let left_vector = unsafe { load_avx512(as_f32_slice(left), index * 2) };
+            let right_vector = unsafe { load_avx512(as_f32_slice(right), index * 2) };
+            accum = _mm512_add_ps(accum, complex_mul_avx512(left_vector, right_vector, sign));
+            index += AVX512_COMPLEX_LANES;
+        }
+        (end, unsafe { horizontal_complex_sum_avx512(accum) })
+    }
+
     /// Loads four f32 values from an unaligned slice offset.
     #[target_feature(enable = "sse2")]
     unsafe fn load_sse(input: &[f32], index: usize) -> __m128 {
@@ -1108,6 +1301,14 @@ mod x86 {
         let mut values = [0.0; SSE_F32_LANES];
         unsafe { _mm_storeu_ps(values.as_mut_ptr(), input) };
         values.iter().sum()
+    }
+
+    /// Horizontally sums packed SSE complex lanes.
+    #[target_feature(enable = "sse2")]
+    unsafe fn horizontal_complex_sum_sse(input: __m128) -> Complex<f32> {
+        let mut values = [0.0; SSE_F32_LANES];
+        unsafe { _mm_storeu_ps(values.as_mut_ptr(), input) };
+        sum_interleaved_complex_lanes(&values)
     }
 
     /// Calculates two SSE complex magnitudes.
@@ -1181,6 +1382,14 @@ mod x86 {
         values.iter().sum()
     }
 
+    /// Horizontally sums packed AVX2 complex lanes.
+    #[target_feature(enable = "avx2")]
+    unsafe fn horizontal_complex_sum_avx2(input: __m256) -> Complex<f32> {
+        let mut values = [0.0; AVX2_F32_LANES];
+        unsafe { _mm256_storeu_ps(values.as_mut_ptr(), input) };
+        sum_interleaved_complex_lanes(&values)
+    }
+
     /// Calculates four AVX2 complex magnitudes.
     #[target_feature(enable = "avx2")]
     unsafe fn avx2_magnitudes(input_f32: &[f32], index: usize) -> [f32; AVX2_COMPLEX_LANES] {
@@ -1248,6 +1457,14 @@ mod x86 {
         values.iter().sum()
     }
 
+    /// Horizontally sums packed AVX-512 complex lanes.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn horizontal_complex_sum_avx512(input: __m512) -> Complex<f32> {
+        let mut values = [0.0; AVX512_F32_LANES];
+        unsafe { _mm512_storeu_ps(values.as_mut_ptr(), input) };
+        sum_interleaved_complex_lanes(&values)
+    }
+
     /// Calculates eight AVX-512 complex magnitudes.
     #[target_feature(enable = "avx512f")]
     unsafe fn avx512_magnitudes(input_f32: &[f32], index: usize) -> [f32; AVX512_COMPLEX_LANES] {
@@ -1289,6 +1506,16 @@ mod tests {
         }
     }
 
+    #[test]
+    fn selected_convolve_full_matches_scalar_reference() {
+        assert_convolve_full_cases_match_reference::<SelectedBackend>();
+    }
+
+    #[test]
+    fn scalar_convolve_full_matches_scalar_reference() {
+        assert_convolve_full_cases_match_reference::<scalar::ScalarBackend>();
+    }
+
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     #[test]
     fn available_x86_backends_match_reference() {
@@ -1297,6 +1524,48 @@ mod tests {
             assert_avx2_backend_matches_reference(len);
             assert_avx512_backend_matches_reference(len);
         }
+    }
+
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[test]
+    fn available_x86_convolve_backends_match_reference() {
+        assert_convolve_full_cases_match_reference::<x86::Sse2Backend>();
+        assert_avx2_convolve_backend_matches_reference();
+        assert_avx512_convolve_backend_matches_reference();
+    }
+
+    #[test]
+    fn convolve_range_matches_full_slice() {
+        let input = make_iq(17, 0.11);
+        let kernel = make_iq(5, -0.19);
+        let mut full_output = zero_iq(input.len() + kernel.len() - 1);
+        let mut range_output = zero_iq(7);
+        iq_convolve_full_to(&input, &kernel, &mut full_output);
+        iq_convolve_range_to(&input, &kernel, 3, &mut range_output);
+        assert_complex_slices_close(&range_output, &full_output[3..10], EPSILON);
+    }
+
+    #[test]
+    #[should_panic(expected = "input must not be empty")]
+    fn convolve_full_panics_on_empty_input() {
+        let kernel = make_iq(1, 0.0);
+        iq_convolve_full_to(&[], &kernel, &mut []);
+    }
+
+    #[test]
+    #[should_panic(expected = "kernel must not be empty")]
+    fn convolve_full_panics_on_empty_kernel() {
+        let input = make_iq(1, 0.0);
+        iq_convolve_full_to(&input, &[], &mut []);
+    }
+
+    #[test]
+    #[should_panic(expected = "full convolution output length must equal input.len() + kernel.len() - 1")]
+    fn convolve_full_panics_on_bad_output_length() {
+        let input = make_iq(4, 0.0);
+        let kernel = make_iq(3, 0.0);
+        let mut output = zero_iq(5);
+        iq_convolve_full_to(&input, &kernel, &mut output);
     }
 
     #[test]
@@ -1412,6 +1681,26 @@ mod tests {
         assert_slices_close(&actual, &expected, EPSILON);
     }
 
+    /// Checks convolution output against scalar reference cases.
+    fn assert_convolve_full_cases_match_reference<B: IqBackend>() {
+        for input_len in convolution_input_lengths() {
+            for kernel_len in convolution_kernel_lengths() {
+                assert_convolve_full_matches::<B>(input_len, kernel_len);
+            }
+        }
+    }
+
+    /// Checks full convolution output for one input and kernel length.
+    fn assert_convolve_full_matches<B: IqBackend>(input_len: usize, kernel_len: usize) {
+        let input = make_iq(input_len, 0.13);
+        let kernel = make_iq(kernel_len, -0.21);
+        let mut actual = zero_iq(input_len + kernel_len - 1);
+        let mut expected = zero_iq(input_len + kernel_len - 1);
+        B::iq_convolve_range_to(&input, &kernel, 0, &mut actual);
+        scalar::iq_convolve_range_to(&input, &kernel, 0, &mut expected);
+        assert_complex_slices_close(&actual, &expected, EPSILON);
+    }
+
     /// Runs AVX2 backend checks when the current test CPU supports it.
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     fn assert_avx2_backend_matches_reference(len: usize) {
@@ -1428,9 +1717,46 @@ mod tests {
         }
     }
 
+    /// Runs AVX2 convolution checks when the current test CPU supports it.
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    fn assert_avx2_convolve_backend_matches_reference() {
+        if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") {
+            assert_convolve_full_cases_match_reference::<x86::Avx2Backend>();
+        }
+    }
+
+    /// Runs AVX-512 convolution checks when the current test CPU supports it.
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    fn assert_avx512_convolve_backend_matches_reference() {
+        if std::is_x86_feature_detected!("avx512f") {
+            assert_convolve_full_cases_match_reference::<x86::Avx512Backend>();
+        }
+    }
+
     /// Returns block lengths around and across the selected lane width.
     fn test_lengths() -> Vec<usize> {
         vec![0, 1, IQ_LANES.saturating_sub(1), IQ_LANES, IQ_LANES + 1, IQ_LANES * 3 + 2, 31]
+    }
+
+    /// Returns convolution input lengths around lanes and larger blocks.
+    fn convolution_input_lengths() -> Vec<usize> {
+        let mut lengths = Vec::new();
+        for len in [1, 2, IQ_LANES.saturating_sub(1), IQ_LANES, IQ_LANES + 1, IQ_LANES * 3 + 2, 31, 128] {
+            push_unique_nonzero(&mut lengths, len);
+        }
+        lengths
+    }
+
+    /// Returns kernel lengths used by direct convolution checks.
+    fn convolution_kernel_lengths() -> [usize; 4] {
+        [1, 2, 5, 51]
+    }
+
+    /// Pushes a nonzero length when it is not already present.
+    fn push_unique_nonzero(lengths: &mut Vec<usize>, len: usize) {
+        if len != 0 && !lengths.contains(&len) {
+            lengths.push(len);
+        }
     }
 
     /// Builds deterministic IQ samples for tests.
