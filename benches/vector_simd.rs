@@ -13,27 +13,30 @@ const POWER_RELATIVE_EPSILON: f32 = 2.0e-5;
 const LEFT_OFFSET: f32 = 0.13;
 const RIGHT_OFFSET: f32 = -0.21;
 const SCALE: f32 = -1.75;
-const AXPY_SCALE_RE: f32 = 0.75;
-const AXPY_SCALE_IM: f32 = -0.25;
+const ADD_SCALED_SCALE_RE: f32 = 0.75;
+const ADD_SCALED_SCALE_IM: f32 = -0.25;
 const CONVOLUTION_SUMMARY_ITERATIONS: usize = 10;
 
 /// Operation type for writing one binary IQ result slice.
 type BinaryToOperation = fn(&[Complex<f32>], &[Complex<f32>], &mut [Complex<f32>]);
 
 /// Operation type for mutating one IQ slice from another IQ slice.
-type BinaryInplaceOperation = fn(&mut [Complex<f32>], &[Complex<f32>]);
+type BinaryInPlaceOperation = fn(&mut [Complex<f32>], &[Complex<f32>]);
 
 /// Operation type for scaling one IQ slice in place.
-type ScaleInplaceOperation = fn(&mut [Complex<f32>], f32);
+type ScaleInPlaceOperation = fn(&mut [Complex<f32>], f32);
 
 /// Operation type for adding a scaled IQ slice in place.
-type AxpyInplaceOperation = fn(&mut [Complex<f32>], Complex<f32>, &[Complex<f32>]);
+type AddScaledInPlaceOperation = fn(&mut [Complex<f32>], Complex<f32>, &[Complex<f32>]);
 
 /// Operation type for returning one scalar IQ reduction.
-type PowerSumOperation = fn(&[Complex<f32>]) -> f32;
+type SumSquaredMagnitudesOperation = fn(&[Complex<f32>]) -> f32;
+
+/// Operation type for returning one complex IQ pairwise reduction.
+type ComplexPairwiseReductionOperation = fn(&[Complex<f32>], &[Complex<f32>]) -> Complex<f32>;
 
 /// Operation type for writing one real-valued IQ result slice.
-type MagnitudeToOperation = fn(&[Complex<f32>], &mut [f32]);
+type CalculateMagnitudesToOperation = fn(&[Complex<f32>], &mut [f32]);
 
 /// Operation type for writing one full IQ convolution result slice.
 type ConvolveFullToOperation = fn(&[Complex<f32>], &[Complex<f32>], &mut [Complex<f32>]);
@@ -49,12 +52,19 @@ struct ConvolutionSmokeTiming {
 /// Registers all SIMD backend benchmarks against scalar references.
 fn vector_simd_benchmarks(criterion: &mut Criterion) {
     bench_binary_to_operation(criterion, "iq_add_to", vector_simd::iq_add_to, scalar_iq_add_to);
-    bench_binary_inplace_operation(criterion, "iq_add_inplace", vector_simd::iq_add_inplace, scalar_iq_add_inplace);
-    bench_scale_inplace_operation(criterion);
-    bench_axpy_inplace_operation(criterion);
-    bench_binary_to_operation(criterion, "iq_mul_to", vector_simd::iq_mul_to, scalar_iq_mul_to);
-    bench_power_sum_operation(criterion);
-    bench_magnitude_to_operation(criterion);
+    bench_binary_in_place_operation(criterion, "iq_add_in_place", vector_simd::iq_add_in_place, scalar_iq_add_in_place);
+    bench_scale_in_place_operation(criterion);
+    bench_add_scaled_in_place_operation(criterion);
+    bench_binary_to_operation(criterion, "iq_multiply_to", vector_simd::iq_multiply_to, scalar_iq_multiply_to);
+    bench_binary_to_operation(
+        criterion,
+        "iq_conjugate_multiply_to",
+        vector_simd::iq_conjugate_multiply_to,
+        scalar_iq_conjugate_multiply_to,
+    );
+    bench_conjugate_multiply_sum_operation(criterion);
+    bench_sum_squared_magnitudes_operation(criterion);
+    bench_iq_calculate_magnitudes_to_operation(criterion);
     bench_convolve_full_to_operation(criterion);
     print_convolution_summary_if_requested();
 }
@@ -77,66 +87,78 @@ fn bench_binary_to_operation(
 }
 
 /// Registers one binary in-place operation for all benchmark block sizes.
-fn bench_binary_inplace_operation(
+fn bench_binary_in_place_operation(
     criterion: &mut Criterion,
     operation_name: &str,
-    selected_operation: BinaryInplaceOperation,
-    scalar_operation: BinaryInplaceOperation,
+    selected_operation: BinaryInPlaceOperation,
+    scalar_operation: BinaryInPlaceOperation,
 ) {
     let mut group = criterion.benchmark_group(format!("vector_simd/{operation_name}"));
     for size in benchmark_sizes() {
-        assert_binary_inplace_matches(size, selected_operation, scalar_operation);
+        assert_binary_in_place_matches(size, selected_operation, scalar_operation);
         set_element_throughput(&mut group, size);
-        bench_binary_inplace_variant(&mut group, "selected_backend", size, selected_operation);
-        bench_binary_inplace_variant(&mut group, "scalar_reference", size, scalar_operation);
+        bench_binary_in_place_variant(&mut group, "selected_backend", size, selected_operation);
+        bench_binary_in_place_variant(&mut group, "scalar_reference", size, scalar_operation);
     }
     group.finish();
 }
 
 /// Registers in-place scaling benchmarks for all benchmark block sizes.
-fn bench_scale_inplace_operation(criterion: &mut Criterion) {
-    let mut group = criterion.benchmark_group("vector_simd/iq_scale_inplace");
+fn bench_scale_in_place_operation(criterion: &mut Criterion) {
+    let mut group = criterion.benchmark_group("vector_simd/iq_scale_in_place");
     for size in benchmark_sizes() {
-        assert_scale_inplace_matches(size);
+        assert_scale_in_place_matches(size);
         set_element_throughput(&mut group, size);
-        bench_scale_inplace_variant(&mut group, "selected_backend", size, vector_simd::iq_scale_inplace);
-        bench_scale_inplace_variant(&mut group, "scalar_reference", size, scalar_iq_scale_inplace);
+        bench_scale_in_place_variant(&mut group, "selected_backend", size, vector_simd::iq_scale_in_place);
+        bench_scale_in_place_variant(&mut group, "scalar_reference", size, scalar_iq_scale_in_place);
     }
     group.finish();
 }
 
-/// Registers in-place AXPY benchmarks for all benchmark block sizes.
-fn bench_axpy_inplace_operation(criterion: &mut Criterion) {
-    let mut group = criterion.benchmark_group("vector_simd/iq_axpy_inplace");
+/// Registers in-place add-scaled benchmarks for all benchmark block sizes.
+fn bench_add_scaled_in_place_operation(criterion: &mut Criterion) {
+    let mut group = criterion.benchmark_group("vector_simd/iq_add_scaled_in_place");
     for size in benchmark_sizes() {
-        assert_axpy_inplace_matches(size);
+        assert_add_scaled_in_place_matches(size);
         set_element_throughput(&mut group, size);
-        bench_axpy_inplace_variant(&mut group, "selected_backend", size, vector_simd::iq_axpy_inplace);
-        bench_axpy_inplace_variant(&mut group, "scalar_reference", size, scalar_iq_axpy_inplace);
+        bench_add_scaled_in_place_variant(&mut group, "selected_backend", size, vector_simd::iq_add_scaled_in_place);
+        bench_add_scaled_in_place_variant(&mut group, "scalar_reference", size, scalar_iq_add_scaled_in_place);
     }
     group.finish();
 }
 
-/// Registers power-sum benchmarks for all benchmark block sizes.
-fn bench_power_sum_operation(criterion: &mut Criterion) {
-    let mut group = criterion.benchmark_group("vector_simd/iq_power_sum");
+/// Registers conjugate-multiply sum benchmarks for all benchmark block sizes.
+fn bench_conjugate_multiply_sum_operation(criterion: &mut Criterion) {
+    let mut group = criterion.benchmark_group("vector_simd/iq_conjugate_multiply_sum");
     for size in benchmark_sizes() {
-        assert_power_sum_matches(size);
+        assert_conjugate_multiply_sum_matches(size);
         set_element_throughput(&mut group, size);
-        bench_power_sum_variant(&mut group, "selected_backend", size, vector_simd::iq_power_sum);
-        bench_power_sum_variant(&mut group, "scalar_reference", size, scalar_iq_power_sum);
+        bench_complex_pairwise_reduction_variant(&mut group, "selected_backend", size, vector_simd::iq_conjugate_multiply_sum);
+        bench_complex_pairwise_reduction_variant(&mut group, "scalar_reference", size, scalar_iq_conjugate_multiply_sum);
+    }
+    group.finish();
+}
+
+/// Registers squared-magnitude sum benchmarks for all benchmark block sizes.
+fn bench_sum_squared_magnitudes_operation(criterion: &mut Criterion) {
+    let mut group = criterion.benchmark_group("vector_simd/iq_sum_squared_magnitudes");
+    for size in benchmark_sizes() {
+        assert_sum_squared_magnitudes_matches(size);
+        set_element_throughput(&mut group, size);
+        bench_sum_squared_magnitudes_variant(&mut group, "selected_backend", size, vector_simd::iq_sum_squared_magnitudes);
+        bench_sum_squared_magnitudes_variant(&mut group, "scalar_reference", size, scalar_iq_sum_squared_magnitudes);
     }
     group.finish();
 }
 
 /// Registers magnitude-output benchmarks for all benchmark block sizes.
-fn bench_magnitude_to_operation(criterion: &mut Criterion) {
-    let mut group = criterion.benchmark_group("vector_simd/magnitude_to");
+fn bench_iq_calculate_magnitudes_to_operation(criterion: &mut Criterion) {
+    let mut group = criterion.benchmark_group("vector_simd/iq_calculate_magnitudes_to");
     for size in benchmark_sizes() {
-        assert_magnitude_to_matches(size);
+        assert_iq_calculate_magnitudes_to_matches(size);
         set_element_throughput(&mut group, size);
-        bench_magnitude_to_variant(&mut group, "selected_backend", size, vector_simd::magnitude_to);
-        bench_magnitude_to_variant(&mut group, "scalar_reference", size, scalar_magnitude_to);
+        bench_iq_calculate_magnitudes_to_variant(&mut group, "selected_backend", size, vector_simd::iq_calculate_magnitudes_to);
+        bench_iq_calculate_magnitudes_to_variant(&mut group, "scalar_reference", size, scalar_iq_calculate_magnitudes_to);
     }
     group.finish();
 }
@@ -168,7 +190,7 @@ fn bench_binary_to_variant(group: &mut BenchmarkGroup<'_, WallTime>, variant_nam
 }
 
 /// Registers one binary in-place benchmark variant.
-fn bench_binary_inplace_variant(group: &mut BenchmarkGroup<'_, WallTime>, variant_name: &str, size: usize, operation: BinaryInplaceOperation) {
+fn bench_binary_in_place_variant(group: &mut BenchmarkGroup<'_, WallTime>, variant_name: &str, size: usize, operation: BinaryInPlaceOperation) {
     let target = make_iq(size, LEFT_OFFSET);
     let input = make_iq(size, RIGHT_OFFSET);
     group.bench_function(BenchmarkId::new(variant_name, size), |bencher| {
@@ -184,7 +206,7 @@ fn bench_binary_inplace_variant(group: &mut BenchmarkGroup<'_, WallTime>, varian
 }
 
 /// Registers one in-place scaling benchmark variant.
-fn bench_scale_inplace_variant(group: &mut BenchmarkGroup<'_, WallTime>, variant_name: &str, size: usize, operation: ScaleInplaceOperation) {
+fn bench_scale_in_place_variant(group: &mut BenchmarkGroup<'_, WallTime>, variant_name: &str, size: usize, operation: ScaleInPlaceOperation) {
     let target = make_iq(size, LEFT_OFFSET);
     group.bench_function(BenchmarkId::new(variant_name, size), |bencher| {
         bencher.iter_batched(
@@ -198,15 +220,24 @@ fn bench_scale_inplace_variant(group: &mut BenchmarkGroup<'_, WallTime>, variant
     });
 }
 
-/// Registers one in-place AXPY benchmark variant.
-fn bench_axpy_inplace_variant(group: &mut BenchmarkGroup<'_, WallTime>, variant_name: &str, size: usize, operation: AxpyInplaceOperation) {
+/// Registers one in-place add-scaled benchmark variant.
+fn bench_add_scaled_in_place_variant(
+    group: &mut BenchmarkGroup<'_, WallTime>,
+    variant_name: &str,
+    size: usize,
+    operation: AddScaledInPlaceOperation,
+) {
     let target = make_iq(size, LEFT_OFFSET);
     let input = make_iq(size, RIGHT_OFFSET);
     group.bench_function(BenchmarkId::new(variant_name, size), |bencher| {
         bencher.iter_batched(
             || target.clone(),
             |mut target| {
-                operation(black_box(target.as_mut_slice()), black_box(axpy_scale()), black_box(input.as_slice()));
+                operation(
+                    black_box(target.as_mut_slice()),
+                    black_box(add_scaled_scale()),
+                    black_box(input.as_slice()),
+                );
                 black_box(target);
             },
             BatchSize::LargeInput,
@@ -214,8 +245,29 @@ fn bench_axpy_inplace_variant(group: &mut BenchmarkGroup<'_, WallTime>, variant_
     });
 }
 
-/// Registers one power-sum benchmark variant.
-fn bench_power_sum_variant(group: &mut BenchmarkGroup<'_, WallTime>, variant_name: &str, size: usize, operation: PowerSumOperation) {
+/// Registers one complex pairwise reduction benchmark variant.
+fn bench_complex_pairwise_reduction_variant(
+    group: &mut BenchmarkGroup<'_, WallTime>,
+    variant_name: &str,
+    size: usize,
+    operation: ComplexPairwiseReductionOperation,
+) {
+    let left = make_iq(size, LEFT_OFFSET);
+    let right = make_iq(size, RIGHT_OFFSET);
+    group.bench_function(BenchmarkId::new(variant_name, size), |bencher| {
+        bencher.iter(|| {
+            black_box(operation(black_box(left.as_slice()), black_box(right.as_slice())));
+        });
+    });
+}
+
+/// Registers one squared-magnitude sum benchmark variant.
+fn bench_sum_squared_magnitudes_variant(
+    group: &mut BenchmarkGroup<'_, WallTime>,
+    variant_name: &str,
+    size: usize,
+    operation: SumSquaredMagnitudesOperation,
+) {
     let input = make_iq(size, LEFT_OFFSET);
     group.bench_function(BenchmarkId::new(variant_name, size), |bencher| {
         bencher.iter(|| {
@@ -225,7 +277,12 @@ fn bench_power_sum_variant(group: &mut BenchmarkGroup<'_, WallTime>, variant_nam
 }
 
 /// Registers one magnitude-output benchmark variant.
-fn bench_magnitude_to_variant(group: &mut BenchmarkGroup<'_, WallTime>, variant_name: &str, size: usize, operation: MagnitudeToOperation) {
+fn bench_iq_calculate_magnitudes_to_variant(
+    group: &mut BenchmarkGroup<'_, WallTime>,
+    variant_name: &str,
+    size: usize,
+    operation: CalculateMagnitudesToOperation,
+) {
     let input = make_iq(size, LEFT_OFFSET);
     let mut output = vec![0.0; size];
     group.bench_function(BenchmarkId::new(variant_name, size), |bencher| {
@@ -462,7 +519,7 @@ fn assert_binary_to_matches(size: usize, selected_operation: BinaryToOperation, 
 }
 
 /// Asserts that a binary in-place operation matches its scalar reference.
-fn assert_binary_inplace_matches(size: usize, selected_operation: BinaryInplaceOperation, scalar_operation: BinaryInplaceOperation) {
+fn assert_binary_in_place_matches(size: usize, selected_operation: BinaryInPlaceOperation, scalar_operation: BinaryInPlaceOperation) {
     let mut actual = make_iq(size, LEFT_OFFSET);
     let mut expected = actual.clone();
     let input = make_iq(size, RIGHT_OFFSET);
@@ -472,39 +529,48 @@ fn assert_binary_inplace_matches(size: usize, selected_operation: BinaryInplaceO
 }
 
 /// Asserts that in-place scaling matches its scalar reference.
-fn assert_scale_inplace_matches(size: usize) {
+fn assert_scale_in_place_matches(size: usize) {
     let mut actual = make_iq(size, LEFT_OFFSET);
     let mut expected = actual.clone();
-    vector_simd::iq_scale_inplace(&mut actual, SCALE);
-    scalar_iq_scale_inplace(&mut expected, SCALE);
+    vector_simd::iq_scale_in_place(&mut actual, SCALE);
+    scalar_iq_scale_in_place(&mut expected, SCALE);
     assert_complex_slices_close(&actual, &expected);
 }
 
-/// Asserts that in-place AXPY matches its scalar reference.
-fn assert_axpy_inplace_matches(size: usize) {
+/// Asserts that in-place add-scaled matches its scalar reference.
+fn assert_add_scaled_in_place_matches(size: usize) {
     let mut actual = make_iq(size, LEFT_OFFSET);
     let mut expected = actual.clone();
     let input = make_iq(size, RIGHT_OFFSET);
-    vector_simd::iq_axpy_inplace(&mut actual, axpy_scale(), &input);
-    scalar_iq_axpy_inplace(&mut expected, axpy_scale(), &input);
+    vector_simd::iq_add_scaled_in_place(&mut actual, add_scaled_scale(), &input);
+    scalar_iq_add_scaled_in_place(&mut expected, add_scaled_scale(), &input);
     assert_complex_slices_close(&actual, &expected);
 }
 
-/// Asserts that power summing matches its scalar reference.
-fn assert_power_sum_matches(size: usize) {
+/// Asserts that conjugate-multiply summing matches its scalar reference.
+fn assert_conjugate_multiply_sum_matches(size: usize) {
+    let left = make_iq(size, LEFT_OFFSET);
+    let right = make_iq(size, RIGHT_OFFSET);
+    let actual = vector_simd::iq_conjugate_multiply_sum(&left, &right);
+    let expected = scalar_iq_conjugate_multiply_sum(&left, &right);
+    assert_complex_close(actual, expected, complex_reduction_epsilon(expected));
+}
+
+/// Asserts that squared-magnitude summing matches its scalar reference.
+fn assert_sum_squared_magnitudes_matches(size: usize) {
     let input = make_iq(size, LEFT_OFFSET);
-    let actual = vector_simd::iq_power_sum(&input);
-    let expected = scalar_iq_power_sum(&input);
-    assert_close(actual, expected, power_sum_epsilon(expected));
+    let actual = vector_simd::iq_sum_squared_magnitudes(&input);
+    let expected = scalar_iq_sum_squared_magnitudes(&input);
+    assert_close(actual, expected, sum_squared_magnitudes_epsilon(expected));
 }
 
 /// Asserts that magnitude output matches its scalar reference.
-fn assert_magnitude_to_matches(size: usize) {
+fn assert_iq_calculate_magnitudes_to_matches(size: usize) {
     let input = make_iq(size, LEFT_OFFSET);
     let mut actual = vec![0.0; size];
     let mut expected = vec![0.0; size];
-    vector_simd::magnitude_to(&input, &mut actual);
-    scalar_magnitude_to(&input, &mut expected);
+    vector_simd::iq_calculate_magnitudes_to(&input, &mut actual);
+    scalar_iq_calculate_magnitudes_to(&input, &mut expected);
     assert_slices_close(&actual, &expected);
 }
 
@@ -527,40 +593,55 @@ fn scalar_iq_add_to(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut 
 }
 
 /// Adds scalar complex samples into `target`.
-fn scalar_iq_add_inplace(target: &mut [Complex<f32>], input: &[Complex<f32>]) {
+fn scalar_iq_add_in_place(target: &mut [Complex<f32>], input: &[Complex<f32>]) {
     for (target_sample, input_sample) in target.iter_mut().zip(input.iter()) {
         *target_sample += *input_sample;
     }
 }
 
 /// Scales scalar complex samples in place.
-fn scalar_iq_scale_inplace(target: &mut [Complex<f32>], scale: f32) {
+fn scalar_iq_scale_in_place(target: &mut [Complex<f32>], scale: f32) {
     for target_sample in target {
         *target_sample *= scale;
     }
 }
 
 /// Adds scalar `scale * input` products into `target`.
-fn scalar_iq_axpy_inplace(target: &mut [Complex<f32>], scale: Complex<f32>, input: &[Complex<f32>]) {
+fn scalar_iq_add_scaled_in_place(target: &mut [Complex<f32>], scale: Complex<f32>, input: &[Complex<f32>]) {
     for (target_sample, input_sample) in target.iter_mut().zip(input.iter()) {
         *target_sample += scale * *input_sample;
     }
 }
 
 /// Multiplies scalar complex samples into `output`.
-fn scalar_iq_mul_to(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]) {
+fn scalar_iq_multiply_to(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]) {
     for ((left_sample, right_sample), output_sample) in left.iter().zip(right.iter()).zip(output.iter_mut()) {
         *output_sample = *left_sample * *right_sample;
     }
 }
 
+/// Writes scalar conjugate-multiply products into `output`.
+fn scalar_iq_conjugate_multiply_to(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]) {
+    for ((left_sample, right_sample), output_sample) in left.iter().zip(right.iter()).zip(output.iter_mut()) {
+        *output_sample = conjugate_multiply_sample(*left_sample, *right_sample);
+    }
+}
+
+/// Returns a scalar sum of conjugate-multiply products.
+fn scalar_iq_conjugate_multiply_sum(left: &[Complex<f32>], right: &[Complex<f32>]) -> Complex<f32> {
+    left.iter()
+        .zip(right.iter())
+        .map(|(left_sample, right_sample)| conjugate_multiply_sample(*left_sample, *right_sample))
+        .sum()
+}
+
 /// Returns a scalar sum of squared magnitudes.
-fn scalar_iq_power_sum(input: &[Complex<f32>]) -> f32 {
+fn scalar_iq_sum_squared_magnitudes(input: &[Complex<f32>]) -> f32 {
     input.iter().map(|sample| sample.norm_sqr()).sum()
 }
 
 /// Writes scalar magnitudes into `output`.
-fn scalar_magnitude_to(input: &[Complex<f32>], output: &mut [f32]) {
+fn scalar_iq_calculate_magnitudes_to(input: &[Complex<f32>], output: &mut [f32]) {
     for (sample, output_sample) in input.iter().zip(output.iter_mut()) {
         *output_sample = sample.norm();
     }
@@ -653,14 +734,24 @@ fn zero_iq(len: usize) -> Vec<Complex<f32>> {
     vec![Complex::new(0.0, 0.0); len]
 }
 
-/// Returns the complex AXPY scale used by checks and benchmarks.
-fn axpy_scale() -> Complex<f32> {
-    Complex::new(AXPY_SCALE_RE, AXPY_SCALE_IM)
+/// Returns the complex add-scaled scale used by checks and benchmarks.
+fn add_scaled_scale() -> Complex<f32> {
+    Complex::new(ADD_SCALED_SCALE_RE, ADD_SCALED_SCALE_IM)
+}
+
+/// Multiplies the conjugate of `left` by `right`.
+fn conjugate_multiply_sample(left: Complex<f32>, right: Complex<f32>) -> Complex<f32> {
+    Complex::new(left.re * right.re + left.im * right.im, left.re * right.im - left.im * right.re)
 }
 
 /// Returns tolerance for f32 reductions with different accumulation orders.
-fn power_sum_epsilon(expected: f32) -> f32 {
+fn sum_squared_magnitudes_epsilon(expected: f32) -> f32 {
     POWER_ABSOLUTE_EPSILON.max(expected.abs() * POWER_RELATIVE_EPSILON)
+}
+
+/// Returns tolerance for complex reductions with different accumulation orders.
+fn complex_reduction_epsilon(expected: Complex<f32>) -> f32 {
+    sum_squared_magnitudes_epsilon(expected.re).max(sum_squared_magnitudes_epsilon(expected.im))
 }
 
 /// Asserts that two complex slices are close.
@@ -670,6 +761,12 @@ fn assert_complex_slices_close(actual: &[Complex<f32>], expected: &[Complex<f32>
         assert_close(actual_sample.re, expected_sample.re, EPSILON);
         assert_close(actual_sample.im, expected_sample.im, EPSILON);
     }
+}
+
+/// Asserts that two complex values are close.
+fn assert_complex_close(actual: Complex<f32>, expected: Complex<f32>, epsilon: f32) {
+    assert_close(actual.re, expected.re, epsilon);
+    assert_close(actual.im, expected.im, epsilon);
 }
 
 /// Asserts that two real-valued slices are close.

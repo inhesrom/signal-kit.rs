@@ -232,7 +232,7 @@ impl ComplexVec<f32> {
     pub fn convolve_simd_to(&self, kernel: &ComplexVec<f32>, mode: ConvMode, output: &mut [Complex<f32>]) {
         let expected_len = convolve_simd_output_len(self.len(), kernel.len(), mode);
         assert_eq!(output.len(), expected_len, "output length must match convolution mode");
-        vector_simd::selected_iq_plan().iq_convolve_range_to(
+        vector_simd::selected_iq_vector_plan().iq_convolve_range_to(
             &self.vector,
             &kernel.vector,
             convolve_simd_full_output_start(kernel.len(), mode),

@@ -17,6 +17,7 @@ When reviewing Rust code, enforce these project rules:
 - Make public functions read like high-level algorithms composed of clearly named steps.
 - Avoid deeply nested logic by extracting helpers and returning early where appropriate.
 - Use descriptive, action-oriented `snake_case` names; avoid abbreviations unless they are domain-standard, such as `rrc`, `iq`, or `fft`.
+- For SIMD APIs, keep domain-standard acronyms such as `iq`, keep `_to` for caller-provided output slices, and spell out operation words and mutation intent such as `multiply`, `conjugate`, `add_scaled`, and `in_place`.
 - Use consistent generic bounds, especially `num_traits::Float` for generic numeric DSP code.
 - Keep trait bounds minimal but sufficient, and document non-obvious generic type parameters.
 - Extract repeated DSP patterns into reusable helpers when similar logic appears more than once.
