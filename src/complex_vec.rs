@@ -210,26 +210,29 @@ where
     }
 }
 
-impl ComplexVec<f32> {
-    /// Convolves with a kernel using the selected f32 SIMD backend.
+impl<T> ComplexVec<T>
+where
+    T: vector_simd::IqSample,
+{
+    /// Convolves with a kernel using the selected SIMD backend.
     ///
     /// # Panics
     /// Panics when `self` or `kernel` is empty, or when `mode` is
     /// `ConvMode::Valid` and the kernel is longer than the input.
-    pub fn convolve_simd(&self, kernel: &ComplexVec<f32>, mode: ConvMode) -> ComplexVec<f32> {
+    pub fn convolve_simd(&self, kernel: &ComplexVec<T>, mode: ConvMode) -> ComplexVec<T> {
         let output_len = convolve_simd_output_len(self.len(), kernel.len(), mode);
-        let mut output = vec![Complex::new(0.0, 0.0); output_len];
+        let mut output = vec![Complex::new(T::zero(), T::zero()); output_len];
         self.convolve_simd_to(kernel, mode, &mut output);
         ComplexVec::from_vec(output)
     }
 
-    /// Writes selected-mode convolution output using the selected f32 SIMD backend.
+    /// Writes selected-mode convolution output using the selected SIMD backend.
     ///
     /// # Panics
     /// Panics when `self` or `kernel` is empty, when `mode` is
     /// `ConvMode::Valid` and the kernel is longer than the input, or when
     /// `output.len()` does not match the selected convolution mode.
-    pub fn convolve_simd_to(&self, kernel: &ComplexVec<f32>, mode: ConvMode, output: &mut [Complex<f32>]) {
+    pub fn convolve_simd_to(&self, kernel: &ComplexVec<T>, mode: ConvMode, output: &mut [Complex<T>]) {
         let expected_len = convolve_simd_output_len(self.len(), kernel.len(), mode);
         assert_eq!(output.len(), expected_len, "output length must match convolution mode");
         vector_simd::selected_iq_vector_plan().iq_convolve_range_to(
@@ -241,7 +244,7 @@ impl ComplexVec<f32> {
     }
 }
 
-/// Returns the output length for a f32 SIMD convolution mode.
+/// Returns the output length for a SIMD convolution mode.
 fn convolve_simd_output_len(input_len: usize, kernel_len: usize, mode: ConvMode) -> usize {
     assert_convolve_simd_inputs(input_len, kernel_len);
     match mode {
@@ -251,7 +254,7 @@ fn convolve_simd_output_len(input_len: usize, kernel_len: usize, mode: ConvMode)
     }
 }
 
-/// Returns the full-output start offset for a f32 SIMD convolution mode.
+/// Returns the full-output start offset for a SIMD convolution mode.
 fn convolve_simd_full_output_start(kernel_len: usize, mode: ConvMode) -> usize {
     match mode {
         ConvMode::Full => 0,
@@ -260,7 +263,7 @@ fn convolve_simd_full_output_start(kernel_len: usize, mode: ConvMode) -> usize {
     }
 }
 
-/// Returns the valid-mode output length for f32 SIMD convolution.
+/// Returns the valid-mode output length for SIMD convolution.
 fn valid_convolve_simd_output_len(input_len: usize, kernel_len: usize) -> usize {
     assert!(
         input_len >= kernel_len,
@@ -269,7 +272,7 @@ fn valid_convolve_simd_output_len(input_len: usize, kernel_len: usize) -> usize 
     input_len - kernel_len + 1
 }
 
-/// Asserts that f32 SIMD convolution inputs are non-empty.
+/// Asserts that SIMD convolution inputs are non-empty.
 fn assert_convolve_simd_inputs(input_len: usize, kernel_len: usize) {
     assert!(input_len > 0, "input must not be empty");
     assert!(kernel_len > 0, "kernel must not be empty");
@@ -697,15 +700,33 @@ mod tests {
     }
 
     #[test]
+    fn test_convolve_simd_matches_convolve_full_f64() {
+        assert_convolve_simd_matches_convolve_f64(17, 5, ConvMode::Full);
+        assert_convolve_simd_matches_convolve_f64(64, 51, ConvMode::Full);
+    }
+
+    #[test]
     fn test_convolve_simd_matches_convolve_same() {
         assert_convolve_simd_matches_convolve(17, 5, ConvMode::Same);
         assert_convolve_simd_matches_convolve(64, 51, ConvMode::Same);
     }
 
     #[test]
+    fn test_convolve_simd_matches_convolve_same_f64() {
+        assert_convolve_simd_matches_convolve_f64(17, 5, ConvMode::Same);
+        assert_convolve_simd_matches_convolve_f64(64, 51, ConvMode::Same);
+    }
+
+    #[test]
     fn test_convolve_simd_matches_convolve_valid() {
         assert_convolve_simd_matches_convolve(17, 5, ConvMode::Valid);
         assert_convolve_simd_matches_convolve(64, 51, ConvMode::Valid);
+    }
+
+    #[test]
+    fn test_convolve_simd_matches_convolve_valid_f64() {
+        assert_convolve_simd_matches_convolve_f64(17, 5, ConvMode::Valid);
+        assert_convolve_simd_matches_convolve_f64(64, 51, ConvMode::Valid);
     }
 
     #[test]
@@ -719,11 +740,29 @@ mod tests {
     }
 
     #[test]
+    fn test_convolve_simd_to_matches_convolve_f64() {
+        let signal = make_complex_vec_f64(23, 0.17);
+        let kernel = make_complex_vec_f64(7, -0.29);
+        let expected = signal.convolve(&kernel, ConvMode::Same);
+        let mut actual = vec![Complex::new(0.0, 0.0); expected.len()];
+        signal.convolve_simd_to(&kernel, ConvMode::Same, &mut actual);
+        assert_complex_slices_close_f64(&actual, &expected.vector, F64_EPSILON);
+    }
+
+    #[test]
     fn test_convolve_simd_impulse() {
         let signal = make_complex_vec_f32(13, 0.07);
         let impulse = ComplexVec::from_vec(vec![Complex::new(1.0, 0.0)]);
         let result = signal.convolve_simd(&impulse, ConvMode::Valid);
         assert_complex_slices_close(&result.vector, &signal.vector, F32_EPSILON);
+    }
+
+    #[test]
+    fn test_convolve_simd_impulse_f64() {
+        let signal = make_complex_vec_f64(13, 0.07);
+        let impulse = ComplexVec::from_vec(vec![Complex::new(1.0, 0.0)]);
+        let result = signal.convolve_simd(&impulse, ConvMode::Valid);
+        assert_complex_slices_close_f64(&result.vector, &signal.vector, F64_EPSILON);
     }
 
     #[test]
@@ -848,6 +887,7 @@ mod tests {
     }
 
     const F32_EPSILON: f32 = 1.0e-4;
+    const F64_EPSILON: f64 = 1.0e-10;
 
     fn assert_convolve_simd_matches_convolve(input_len: usize, kernel_len: usize, mode: ConvMode) {
         let signal = make_complex_vec_f32(input_len, 0.13);
@@ -855,6 +895,14 @@ mod tests {
         let actual = signal.convolve_simd(&kernel, mode);
         let expected = signal.convolve(&kernel, mode);
         assert_complex_slices_close(&actual.vector, &expected.vector, F32_EPSILON);
+    }
+
+    fn assert_convolve_simd_matches_convolve_f64(input_len: usize, kernel_len: usize, mode: ConvMode) {
+        let signal = make_complex_vec_f64(input_len, 0.13);
+        let kernel = make_complex_vec_f64(kernel_len, -0.21);
+        let actual = signal.convolve_simd(&kernel, mode);
+        let expected = signal.convolve(&kernel, mode);
+        assert_complex_slices_close_f64(&actual.vector, &expected.vector, F64_EPSILON);
     }
 
     fn make_complex_vec_f32(len: usize, offset: f32) -> ComplexVec<f32> {
@@ -868,7 +916,26 @@ mod tests {
         )
     }
 
+    fn make_complex_vec_f64(len: usize, offset: f64) -> ComplexVec<f64> {
+        ComplexVec::from_vec(
+            (0..len)
+                .map(|index| {
+                    let value = index as f64 + offset;
+                    Complex::new(value.sin() * 0.5, value.cos() * -0.25)
+                })
+                .collect(),
+        )
+    }
+
     fn assert_complex_slices_close(actual: &[Complex<f32>], expected: &[Complex<f32>], epsilon: f32) {
+        assert_eq!(actual.len(), expected.len());
+        for (actual_sample, expected_sample) in actual.iter().zip(expected.iter()) {
+            assert!((actual_sample.re - expected_sample.re).abs() <= epsilon);
+            assert!((actual_sample.im - expected_sample.im).abs() <= epsilon);
+        }
+    }
+
+    fn assert_complex_slices_close_f64(actual: &[Complex<f64>], expected: &[Complex<f64>], epsilon: f64) {
         assert_eq!(actual.len(), expected.len());
         for (actual_sample, expected_sample) in actual.iter().zip(expected.iter()) {
             assert!((actual_sample.re - expected_sample.re).abs() <= epsilon);
