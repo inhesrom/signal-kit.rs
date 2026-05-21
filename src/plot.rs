@@ -2,7 +2,7 @@ use num_complex::Complex;
 use num_traits::Float;
 use plotly::{Plot, Scatter, Layout};
 use plotly::common::Mode;
-use plotly::layout::Axis;
+use plotly::layout::{Axis, GridPattern, LayoutGrid};
 
 /// Plot a spectrum or frequency response
 ///
@@ -29,6 +29,63 @@ pub fn plot_spectrum<T: Float>(freqs: &Vec<T>, spectrum: &Vec<T>, title: &str) {
     plot.set_layout(layout);
 
     plot.show();
+}
+
+/// Plot two spectra side-by-side in a single window.
+///
+/// Renders the two `(freqs, magnitude_db, subtitle)` traces as a 1-row × 2-column
+/// subplot grid so different sample rates (or pre/post-resampling spectra) can be
+/// compared visually. Each panel uses its own x-axis range; both share the same
+/// "Magnitude (dB)" y-axis title.
+///
+/// # Arguments
+/// * `left` - `(freqs, spectrum_db, subtitle)` for the left panel.
+/// * `right` - `(freqs, spectrum_db, subtitle)` for the right panel.
+/// * `title` - Overall figure title.
+pub fn plot_spectrum_pair<T: Float>(
+    left: (&Vec<T>, &Vec<T>, &str),
+    right: (&Vec<T>, &Vec<T>, &str),
+    title: &str,
+) {
+    let mut plot = Plot::new();
+    plot.add_trace(spectrum_subplot_trace(left.0, left.1, left.2, "x1", "y1"));
+    plot.add_trace(spectrum_subplot_trace(right.0, right.1, right.2, "x2", "y2"));
+    plot.set_layout(side_by_side_spectrum_layout(title));
+    plot.show();
+}
+
+/// Builds one frequency-vs-dB trace attached to the given subplot axes.
+fn spectrum_subplot_trace<T: Float>(
+    freqs: &[T],
+    spectrum: &[T],
+    name: &str,
+    x_axis: &str,
+    y_axis: &str,
+) -> Box<Scatter<f64, f64>> {
+    let freqs_f64: Vec<f64> = freqs.iter().map(|f| f.to_f64().unwrap()).collect();
+    let spectrum_f64: Vec<f64> = spectrum.iter().map(|s| s.to_f64().unwrap()).collect();
+    Scatter::new(freqs_f64, spectrum_f64)
+        .mode(Mode::Lines)
+        .name(name)
+        .x_axis(x_axis)
+        .y_axis(y_axis)
+}
+
+/// Returns the layout for a 1-row × 2-column side-by-side spectrum figure.
+fn side_by_side_spectrum_layout(title: &str) -> Layout {
+    Layout::new()
+        .title(title)
+        .grid(
+            LayoutGrid::new()
+                .rows(1)
+                .columns(2)
+                .pattern(GridPattern::Independent),
+        )
+        .x_axis(Axis::new().title("Frequency (Hz)").domain(&[0.0, 0.45]))
+        .y_axis(Axis::new().title("Magnitude (dB)").domain(&[0.0, 1.0]))
+        .x_axis2(Axis::new().title("Frequency (Hz)").domain(&[0.55, 1.0]))
+        .y_axis2(Axis::new().title("Magnitude (dB)").domain(&[0.0, 1.0]))
+        .auto_size(true)
 }
 
 /// Plot a constellation diagram from a vector of complex symbols

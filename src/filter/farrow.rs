@@ -345,6 +345,73 @@ mod tests {
     }
 
     #[test]
+    fn test_farrow_resample_4sps_to_1p5sps() {
+        use crate::complex_vec::ComplexVec;
+        use crate::fft::{fft, fftfreqs, fftshift};
+        use crate::generate::psk_carrier::PskCarrier;
+        use crate::mod_type::ModType;
+        use crate::test_utils::should_plot;
+        use crate::vector_ops;
+
+        let input_rate_hz = 4e6_f64;
+        let output_rate_hz = 1.5e6_f64;
+        let symbol_rate_hz = 1e6_f64;
+        let block_size: usize = 4096;
+
+        let mut carrier = PskCarrier::new(
+            input_rate_hz,
+            symbol_rate_hz,
+            ModType::_QPSK,
+            0.35_f64,
+            block_size,
+            51,
+            Some(7),
+        );
+        let signal = carrier.generate_block();
+
+        let input_slice: Vec<Complex<f64>> = signal.iter().cloned().collect();
+        let mut resampler = FarrowResampler::<f64>::cubic_lagrange(input_rate_hz, output_rate_hz);
+        let resampled = resampler.process_block(&input_slice);
+
+        let expected_len = (block_size as f64 * output_rate_hz / input_rate_hz).round() as i64;
+        let length_delta = (resampled.len() as i64 - expected_len).abs();
+        assert!(
+            length_delta <= 1,
+            "resampled length {} not within 1 of expected {}",
+            resampled.len(),
+            expected_len
+        );
+
+        if !should_plot() {
+            println!("Skipping farrow resample plot (set PLOT=true to enable)");
+            return;
+        }
+
+        let mut input_fft_data: Vec<Complex<f64>> = signal.iter().cloned().collect();
+        fft(&mut input_fft_data[..]);
+        let mut input_fft = ComplexVec::from_vec(input_fft_data);
+        let mut input_db: Vec<f64> = vector_ops::to_db(&input_fft.abs());
+        fftshift::<f64>(&mut input_db);
+        let input_freqs: Vec<f64> =
+            fftfreqs::<f64>(-input_rate_hz / 2.0, input_rate_hz / 2.0, input_db.len());
+
+        let mut output_fft_data = resampled.clone();
+        fft(&mut output_fft_data[..]);
+        let mut output_fft = ComplexVec::from_vec(output_fft_data);
+        let mut output_db: Vec<f64> = vector_ops::to_db(&output_fft.abs());
+        fftshift::<f64>(&mut output_db);
+        let output_freqs: Vec<f64> =
+            fftfreqs::<f64>(-output_rate_hz / 2.0, output_rate_hz / 2.0, output_db.len());
+
+        use crate::plot::plot_spectrum_pair;
+        plot_spectrum_pair(
+            (&input_freqs, &input_db, "4 sps input @ 4 MHz"),
+            (&output_freqs, &output_db, "1.5 sps output @ 1.5 MHz"),
+            "Farrow downsample: 4 → 1.5 samples per symbol",
+        );
+    }
+
+    #[test]
     fn test_polynomial_coefficients_pass_dc() {
         let coeffs = cubic_lagrange_coeffs::<f64>();
         for mu_index in 0..21 {
