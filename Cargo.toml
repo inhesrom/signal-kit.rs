@@ -30,3 +30,7 @@ python = ["pyo3", "numpy"]
 [[bench]]
 name = "vector_simd"
 harness = false
+
+[[bench]]
+name = "farrow"
+harness = false

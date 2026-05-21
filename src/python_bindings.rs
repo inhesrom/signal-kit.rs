@@ -5,6 +5,7 @@ use pyo3::types::PyDict;
 use numpy::{PyArray1, IntoPyArray, PyReadonlyArray1};
 use num_complex::Complex;
 use crate::{Carrier, Channel, ModType};
+use crate::filter::FarrowResampler;
 use crate::generate::Impairment;
 use crate::spectrum::{welch as welch_impl, WindowType};
 
@@ -429,6 +430,68 @@ impl PythonChannel {
     }
 }
 
+/// Python wrapper for the streaming cubic-Lagrange Farrow resampler.
+///
+/// Maintains a 4-sample delay line and fractional phase across `process()`
+/// calls so the same input split into blocks of any size yields the same
+/// output as feeding it in one call.
+///
+/// Parameters:
+///     input_rate_hz (float): Input sample rate in Hz (must be positive).
+///     output_rate_hz (float): Output sample rate in Hz (must be positive).
+///
+/// Example:
+///     >>> import signal_kit, numpy as np
+///     >>> resampler = signal_kit.FarrowResampler(1e6, 1.5e6)
+///     >>> iq_out = resampler.process(np.ones(1024, dtype=np.complex128))
+#[pyclass(name = "FarrowResampler")]
+pub struct PythonFarrowResampler {
+    inner: FarrowResampler<f64>,
+}
+
+#[pymethods]
+impl PythonFarrowResampler {
+    #[new]
+    fn new(input_rate_hz: f64, output_rate_hz: f64) -> PyResult<Self> {
+        if input_rate_hz <= 0.0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "input_rate_hz must be positive",
+            ));
+        }
+        if output_rate_hz <= 0.0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "output_rate_hz must be positive",
+            ));
+        }
+        Ok(PythonFarrowResampler {
+            inner: FarrowResampler::cubic_lagrange(input_rate_hz, output_rate_hz),
+        })
+    }
+
+    /// Clear the delay line and fractional phase. Resampling ratio is preserved.
+    fn reset(&mut self) {
+        self.inner.reset();
+    }
+
+    /// Resample a complex128 block, advancing the streaming state.
+    ///
+    /// Parameters:
+    ///     input (numpy.ndarray): Complex-valued (complex128) input samples.
+    ///
+    /// Returns:
+    ///     numpy.ndarray: Complex-valued output samples whose length is
+    ///         approximately `len(input) * output_rate_hz / input_rate_hz`.
+    fn process(
+        &mut self,
+        py: Python,
+        input: PyReadonlyArray1<Complex<f64>>,
+    ) -> Py<PyArray1<Complex<f64>>> {
+        let input_vec: Vec<Complex<f64>> = input.as_array().to_vec();
+        let output = self.inner.process_block(&input_vec);
+        output.into_pyarray_bound(py).into()
+    }
+}
+
 /// Helper function to parse window type from string
 fn parse_window_type(window_str: &str) -> PyResult<WindowType> {
     match window_str.to_lowercase().as_str() {
@@ -568,6 +631,7 @@ fn welch(
 fn _signal_kit(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PythonCarrier>()?;
     m.add_class::<PythonChannel>()?;
+    m.add_class::<PythonFarrowResampler>()?;
     m.add_function(wrap_pyfunction!(welch, m)?)?;
     m.add("__version__", "0.1.0")?;
 
