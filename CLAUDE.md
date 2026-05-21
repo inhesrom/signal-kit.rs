@@ -6,6 +6,33 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 SignalKit.rs is a Rust library for digital signal processing, focused on communication systems. It implements components for generating, modulating, filtering, and processing digital signals commonly used in wireless communications.
 
+## Rust Style Enforcement
+
+After writing, modifying, or refactoring Rust source files, proactively run a Rust style review using the `rust-style-enforcer` guidance from `AGENTS.md`. Treat that review as part of completing the change, not as an optional follow-up.
+
+When reviewing Rust code, enforce these project rules:
+
+- Keep each function focused on one responsibility.
+- Target 5-20 lines per function, excluding doc comments; refactor longer functions into named helpers.
+- Make public functions read like high-level algorithms composed of clearly named steps.
+- Avoid deeply nested logic by extracting helpers and returning early where appropriate.
+- Use descriptive, action-oriented `snake_case` names; avoid abbreviations unless they are domain-standard, such as `rrc`, `iq`, or `fft`.
+- For SIMD APIs, keep domain-standard acronyms such as `iq`, keep `_to` for caller-provided output slices, and spell out operation words and mutation intent such as `multiply`, `conjugate`, `add_scaled`, and `in_place`.
+- Use consistent generic bounds, especially `num_traits::Float` for generic numeric DSP code.
+- Keep trait bounds minimal but sufficient, and document non-obvious generic type parameters.
+- Extract repeated DSP patterns into reusable helpers when similar logic appears more than once.
+- Document every public function with `///` comments.
+- Add brief doc comments for private helper functions that explain their purpose.
+
+For Rust style reviews, report:
+
+1. Summary
+2. Issues Found, prioritized by correctness, clarity, then minor style concerns
+3. Positive Observations
+4. Refactoring Suggestions with concrete alternatives when helpful
+
+DSP math can be complex in this repository, so prefer small, named functions that expose the intent of each signal-processing step. Clarity comes before optimization unless there is a measured performance issue.
+
 ## Build and Test Commands
 
 ### Rust (Core Library)

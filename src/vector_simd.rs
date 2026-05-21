@@ -1,1895 +1,4129 @@
-#![allow(dead_code)]
+//! Build-time selected SIMD operations for real-time IQ blocks.
 
+use bytemuck::{cast_slice, cast_slice_mut};
 use num_complex::Complex;
-use std::ops::{Add, Sub, Mul, Div, Index, IndexMut, AddAssign, SubAssign, MulAssign, DivAssign};
-use bytemuck::{cast_slice, cast_slice_mut, Pod};
+use num_traits::Float;
 
-// ============================================================================
-// SIMD Configuration Module - Change these type aliases to switch register width
-// ============================================================================
-
-mod simd_config {
-    /// Current configuration: 128-bit registers
-    ///
-    /// To use 256-bit registers, change:
-    /// - F32Batch from `wide::f32x4` to `wide::f32x8`
-    /// - F64Batch from `wide::f64x2` to `wide::f64x4`
-    ///
-    /// To use 512-bit registers, change to:
-    /// - F32Batch: `wide::f32x16`
-    /// - F64Batch: `wide::f64x8`
-    pub type F32Batch = wide::f32x4;  // 128-bit: 4 × f32
-    pub type F64Batch = wide::f64x2;  // 128-bit: 2 × f64
-}
-
-// ============================================================================
-// SIMD Batch Trait - Abstracts over different register widths
-// ============================================================================
-
-/// Trait for SIMD batch operations, allowing generic code over different register widths
-///
-/// # Memory Alignment
-///
-/// All load/store operations use **unaligned** instructions, which work correctly
-/// regardless of memory alignment. On modern CPUs (Intel Nehalem+ 2008, AMD Bulldozer+ 2011),
-/// unaligned loads/stores have **zero performance penalty** for aligned data.
-///
-/// This design choice provides:
-/// - **Safety**: Works with any slice, no alignment requirements
-/// - **Performance**: Equal to aligned loads on modern hardware
-/// - **Simplicity**: No need to track or enforce alignment
-///
-/// The only remaining penalty is cache-line splits (when data crosses cache boundaries),
-/// which is unavoidable and handled automatically by the CPU.
-pub trait SimdBatch: Sized + Copy {
-    type Scalar: Copy;
-
-    /// Number of lanes (elements) in this SIMD batch
-    const LANES: usize;
-
-    /// Create a batch with all lanes set to zero
-    fn zero() -> Self;
-
-    /// Create a batch with all lanes set to the same value (splat)
-    fn splat(value: Self::Scalar) -> Self;
-
-    /// Load LANES elements from a slice (works with any alignment)
-    fn load(ptr: &[Self::Scalar]) -> Self;
-
-    /// Store LANES elements to a slice (works with any alignment)
-    fn store(self, ptr: &mut [Self::Scalar]);
-
-    /// Addition
-    fn add(self, rhs: Self) -> Self;
-
-    /// Subtraction
-    fn sub(self, rhs: Self) -> Self;
-
-    /// Multiplication
-    fn mul(self, rhs: Self) -> Self;
-
-    /// Division
-    fn div(self, rhs: Self) -> Self;
-
-    /// Absolute value
-    fn abs(self) -> Self;
-
-    /// Horizontal sum (reduce all lanes to single scalar)
-    fn horizontal_sum(self) -> Self::Scalar;
-}
-
-// ============================================================================
-// SimdBatch Implementation for f32x4 (128-bit)
-// ============================================================================
-
-impl SimdBatch for wide::f32x4 {
-    type Scalar = f32;
-    const LANES: usize = 4;
-
-    #[inline]
-    fn zero() -> Self {
-        Self::ZERO
-    }
-
-    #[inline]
-    fn splat(value: f32) -> Self {
-        Self::splat(value)
-    }
-
-    #[inline]
-    fn load(ptr: &[f32]) -> Self {
-        assert!(ptr.len() >= 4, "Need at least 4 elements for f32x4");
-        Self::from(&ptr[0..4])
-    }
-
-    #[inline]
-    fn store(self, ptr: &mut [f32]) {
-        assert!(ptr.len() >= 4, "Need at least 4 elements for f32x4");
-        let arr = self.to_array();
-        ptr[0..4].copy_from_slice(&arr);
-    }
-
-    #[inline]
-    fn add(self, rhs: Self) -> Self {
-        self + rhs
-    }
-
-    #[inline]
-    fn sub(self, rhs: Self) -> Self {
-        self - rhs
-    }
-
-    #[inline]
-    fn mul(self, rhs: Self) -> Self {
-        self * rhs
-    }
-
-    #[inline]
-    fn div(self, rhs: Self) -> Self {
-        self / rhs
-    }
-
-    #[inline]
-    fn abs(self) -> Self {
-        self.abs()
-    }
-
-    #[inline]
-    fn horizontal_sum(self) -> f32 {
-        let arr = self.to_array();
-        arr[0] + arr[1] + arr[2] + arr[3]
-    }
-}
-
-// ============================================================================
-// SimdBatch Implementation for f64x2 (128-bit)
-// ============================================================================
-
-impl SimdBatch for wide::f64x2 {
-    type Scalar = f64;
-    const LANES: usize = 2;
-
-    #[inline]
-    fn zero() -> Self {
-        Self::ZERO
-    }
-
-    #[inline]
-    fn splat(value: f64) -> Self {
-        Self::splat(value)
-    }
-
-    #[inline]
-    fn load(ptr: &[f64]) -> Self {
-        assert!(ptr.len() >= 2, "Need at least 2 elements for f64x2");
-        Self::from([ptr[0], ptr[1]])
-    }
-
-    #[inline]
-    fn store(self, ptr: &mut [f64]) {
-        assert!(ptr.len() >= 2, "Need at least 2 elements for f64x2");
-        let arr = self.to_array();
-        ptr[0..2].copy_from_slice(&arr);
-    }
-
-    #[inline]
-    fn add(self, rhs: Self) -> Self {
-        self + rhs
-    }
-
-    #[inline]
-    fn sub(self, rhs: Self) -> Self {
-        self - rhs
-    }
-
-    #[inline]
-    fn mul(self, rhs: Self) -> Self {
-        self * rhs
-    }
-
-    #[inline]
-    fn div(self, rhs: Self) -> Self {
-        self / rhs
-    }
-
-    #[inline]
-    fn abs(self) -> Self {
-        self.abs()
-    }
-
-    #[inline]
-    fn horizontal_sum(self) -> f64 {
-        let arr = self.to_array();
-        arr[0] + arr[1]
-    }
-}
-
-// ============================================================================
-// VectorSimd Structure and Basic Methods
-// ============================================================================
-
-/// A SIMD-accelerated vector wrapper that provides efficient element-wise operations.
-///
-/// This struct wraps a Vec<T> and provides SIMD-optimized operations for arithmetic
-/// and signal processing operations like convolution.
-///
-/// Register width is configurable via the `simd_config` module at compile time.
-#[derive(Clone, Debug)]
-pub struct VectorSimd<T> {
-    data: Vec<T>,
-}
-
-impl<T> VectorSimd<T>
-where
-    T: Clone,
-{
-    /// Creates a new empty VectorSimd
-    pub fn new() -> Self {
-        Self { data: Vec::new() }
-    }
-
-    /// Creates a VectorSimd with a specific capacity
-    pub fn with_capacity(capacity: usize) -> Self {
-        Self {
-            data: Vec::with_capacity(capacity),
-        }
-    }
-
-    /// Creates a VectorSimd with `count` elements, all initialized to `value`
-    pub fn with_value(count: usize, value: T) -> Self {
-        Self {
-            data: vec![value; count],
-        }
-    }
-
-    /// Creates a VectorSimd from an existing Vec
-    pub fn from_vec(vec: Vec<T>) -> Self {
-        Self { data: vec }
-    }
-
-    /// Returns the number of elements in the vector
-    pub fn size(&self) -> usize {
-        self.data.len()
-    }
-
-    /// Returns the number of elements in the vector (alias for size())
-    pub fn len(&self) -> usize {
-        self.data.len()
-    }
-
-    /// Returns true if the vector is empty
-    pub fn is_empty(&self) -> bool {
-        self.data.is_empty()
-    }
-
-    /// Adds an element to the end of the vector
-    pub fn push_back(&mut self, value: T) {
-        self.data.push(value);
-    }
-
-    /// Adds an element to the end of the vector (alias for push_back)
-    pub fn push(&mut self, value: T) {
-        self.data.push(value);
-    }
-
-    /// Reserves capacity for at least `additional` more elements
-    pub fn reserve(&mut self, additional: usize) {
-        self.data.reserve(additional);
-    }
-
-    /// Appends another VectorSimd to this one
-    pub fn append(&mut self, other: &VectorSimd<T>) {
-        self.data.extend_from_slice(&other.data);
-    }
-
-    /// Returns a slice view of the underlying data
-    pub fn as_slice(&self) -> &[T] {
-        &self.data
-    }
-
-    /// Returns a mutable slice view of the underlying data
-    pub fn as_mut_slice(&mut self) -> &mut [T] {
-        &mut self.data
-    }
-
-    /// Returns a raw pointer to the underlying data
-    pub fn as_ptr(&self) -> *const T {
-        self.data.as_ptr()
-    }
-
-    /// Returns a mutable raw pointer to the underlying data
-    pub fn as_mut_ptr(&mut self) -> *mut T {
-        self.data.as_mut_ptr()
-    }
-}
-
-impl<T> Default for VectorSimd<T>
-where
-    T: Clone,
-{
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-// Index trait for element access
-impl<T> Index<usize> for VectorSimd<T> {
-    type Output = T;
-
-    fn index(&self, index: usize) -> &Self::Output {
-        &self.data[index]
-    }
-}
-
-impl<T> IndexMut<usize> for VectorSimd<T> {
-    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
-        &mut self.data[index]
-    }
-}
-
-// FromIterator to allow collecting into VectorSimd
-impl<T> FromIterator<T> for VectorSimd<T>
-where
-    T: Clone,
-{
-    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
-        Self {
-            data: iter.into_iter().collect(),
-        }
-    }
-}
-
-// ============================================================================
-// Generic SIMD Operation Framework
-// ============================================================================
-
-/// Operation types for batch processing
+/// Describes the DSP vector backend selected by the build script.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Operation {
-    Add,
-    Subtract,
-    Multiply,
-    Divide,
+pub enum SimdBackend {
+    /// Scalar fallback for non-SIMD builds and unsupported targets.
+    Scalar,
+    /// SSE2 backend using 128-bit registers.
+    Sse2,
+    /// AVX2/FMA backend using 256-bit registers.
+    Avx2Fma,
+    /// AVX-512F backend using 512-bit registers.
+    Avx512F,
 }
 
-impl<T> VectorSimd<T>
-where
-    T: Copy + Default + Pod,
+impl SimdBackend {
+    /// Returns the backend register width in bits.
+    pub const fn register_bits(self) -> usize {
+        match self {
+            Self::Scalar => 32,
+            Self::Sse2 => 128,
+            Self::Avx2Fma => 256,
+            Self::Avx512F => 512,
+        }
+    }
+
+    /// Returns the number of complex f32 IQ samples per vector register.
+    pub const fn iq_lanes(self) -> usize {
+        self.iq_lanes_f32()
+    }
+
+    /// Returns the number of complex f32 IQ samples per vector register.
+    pub const fn iq_lanes_f32(self) -> usize {
+        match self {
+            Self::Scalar => 1,
+            _ => self.register_bits() / 64,
+        }
+    }
+
+    /// Returns the number of complex f64 IQ samples per vector register.
+    pub const fn iq_lanes_f64(self) -> usize {
+        match self {
+            Self::Scalar => 1,
+            _ => self.register_bits() / 128,
+        }
+    }
+}
+
+/// A small planner exposing the selected IQ backend and lane geometry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IqVectorPlan {
+    backend: SimdBackend,
+    register_bits: usize,
+    iq_lanes_f32: usize,
+    iq_lanes_f64: usize,
+}
+
+impl IqVectorPlan {
+    /// Builds a plan for the backend selected at compile time.
+    pub const fn selected() -> Self {
+        Self {
+            backend: SELECTED_BACKEND,
+            register_bits: REGISTER_BITS,
+            iq_lanes_f32: IQ_LANES_F32,
+            iq_lanes_f64: IQ_LANES_F64,
+        }
+    }
+
+    /// Returns the backend selected for this build.
+    pub const fn backend(self) -> SimdBackend {
+        self.backend
+    }
+
+    /// Returns the selected register width in bits.
+    pub const fn register_bits(self) -> usize {
+        self.register_bits
+    }
+
+    /// Returns complex f32 IQ samples processed per vector register.
+    pub const fn iq_lanes(self) -> usize {
+        self.iq_lanes_f32
+    }
+
+    /// Returns complex f32 IQ samples processed per vector register.
+    pub const fn iq_lanes_f32(self) -> usize {
+        self.iq_lanes_f32
+    }
+
+    /// Returns complex f64 IQ samples processed per vector register.
+    pub const fn iq_lanes_f64(self) -> usize {
+        self.iq_lanes_f64
+    }
+
+    /// Returns complex IQ samples processed per vector register for `T`.
+    pub fn iq_lanes_for<T: IqSample>(self) -> usize {
+        T::iq_lanes_for_backend(self.backend)
+    }
+
+    /// Writes `left + right` into `output` without allocating.
+    pub fn iq_add_to<T: IqSample>(self, left: &[Complex<T>], right: &[Complex<T>], output: &mut [Complex<T>]) {
+        iq_add_to(left, right, output);
+    }
+
+    /// Adds `input` into `target` without allocating.
+    pub fn iq_add_in_place<T: IqSample>(self, target: &mut [Complex<T>], input: &[Complex<T>]) {
+        iq_add_in_place(target, input);
+    }
+
+    /// Scales `target` by `scale` without allocating.
+    pub fn iq_scale_in_place<T: IqSample>(self, target: &mut [Complex<T>], scale: T) {
+        iq_scale_in_place(target, scale);
+    }
+
+    /// Adds `scale * input` into `target` without allocating.
+    pub fn iq_add_scaled_in_place<T: IqSample>(self, target: &mut [Complex<T>], scale: Complex<T>, input: &[Complex<T>]) {
+        iq_add_scaled_in_place(target, scale, input);
+    }
+
+    /// Writes `left * right` into `output` without allocating.
+    pub fn iq_multiply_to<T: IqSample>(self, left: &[Complex<T>], right: &[Complex<T>], output: &mut [Complex<T>]) {
+        iq_multiply_to(left, right, output);
+    }
+
+    /// Writes `conjugate(left) * right` into `output` without allocating.
+    pub fn iq_conjugate_multiply_to<T: IqSample>(self, left: &[Complex<T>], right: &[Complex<T>], output: &mut [Complex<T>]) {
+        iq_conjugate_multiply_to(left, right, output);
+    }
+
+    /// Returns the sum of `conjugate(left) * right` for each pair of IQ samples.
+    pub fn iq_conjugate_multiply_sum<T: IqSample>(self, left: &[Complex<T>], right: &[Complex<T>]) -> Complex<T> {
+        iq_conjugate_multiply_sum(left, right)
+    }
+
+    /// Returns the sum of per-sample IQ power values.
+    pub fn iq_sum_squared_magnitudes<T: IqSample>(self, input: &[Complex<T>]) -> T {
+        iq_sum_squared_magnitudes(input)
+    }
+
+    /// Writes per-sample magnitudes into `output` without allocating.
+    pub fn iq_calculate_magnitudes_to<T: IqSample>(self, input: &[Complex<T>], output: &mut [T]) {
+        iq_calculate_magnitudes_to(input, output);
+    }
+
+    /// Writes the full direct IQ convolution into `output` without allocating.
+    ///
+    /// # Panics
+    /// Panics when `input` or `kernel` is empty, or when `output.len()` is not
+    /// `input.len() + kernel.len() - 1`.
+    pub fn iq_convolve_full_to<T: IqSample>(self, input: &[Complex<T>], kernel: &[Complex<T>], output: &mut [Complex<T>]) {
+        iq_convolve_full_to(input, kernel, output);
+    }
+
+    /// Writes a direct IQ convolution range into `output` without allocating.
+    pub(crate) fn iq_convolve_range_to<T: IqSample>(
+        self,
+        input: &[Complex<T>],
+        kernel: &[Complex<T>],
+        full_output_start: usize,
+        output: &mut [Complex<T>],
+    ) {
+        iq_convolve_range_to(input, kernel, full_output_start, output);
+    }
+}
+
+impl Default for IqVectorPlan {
+    fn default() -> Self {
+        Self::selected()
+    }
+}
+
+/// Backend selected by the current build.
+pub const SELECTED_BACKEND: SimdBackend = selected_backend();
+
+/// Register width selected by the current build.
+pub const REGISTER_BITS: usize = SELECTED_BACKEND.register_bits();
+
+/// Complex f32 samples processed per selected register.
+pub const IQ_LANES: usize = IQ_LANES_F32;
+
+/// Complex f32 samples processed per selected register.
+pub const IQ_LANES_F32: usize = SELECTED_BACKEND.iq_lanes_f32();
+
+/// Complex f64 samples processed per selected register.
+pub const IQ_LANES_F64: usize = SELECTED_BACKEND.iq_lanes_f64();
+
+#[cfg(signal_kit_simd_avx512)]
+type SelectedBackend = x86::Avx512Backend;
+
+#[cfg(signal_kit_simd_avx2)]
+type SelectedBackend = x86::Avx2Backend;
+
+#[cfg(signal_kit_simd_sse2)]
+type SelectedBackend = x86::Sse2Backend;
+
+#[cfg(any(signal_kit_simd_scalar, not(any(signal_kit_simd_avx512, signal_kit_simd_avx2, signal_kit_simd_sse2))))]
+type SelectedBackend = scalar::ScalarBackend;
+
+/// Scalar type supported by the IQ SIMD API.
+///
+/// This trait is sealed so only `f32` and `f64` can use the generic SIMD
+/// functions.
+pub trait IqSample: private::Sealed + Float + bytemuck::Pod {
+    /// Returns complex IQ samples processed per register for `backend`.
+    #[doc(hidden)]
+    fn iq_lanes_for_backend(backend: SimdBackend) -> usize;
+
+    /// Writes `left + right` into `output` using the selected backend.
+    #[doc(hidden)]
+    fn selected_iq_add_to(left: &[Complex<Self>], right: &[Complex<Self>], output: &mut [Complex<Self>]);
+
+    /// Adds `input` into `target` using the selected backend.
+    #[doc(hidden)]
+    fn selected_iq_add_in_place(target: &mut [Complex<Self>], input: &[Complex<Self>]);
+
+    /// Scales `target` by `scale` using the selected backend.
+    #[doc(hidden)]
+    fn selected_iq_scale_in_place(target: &mut [Complex<Self>], scale: Self);
+
+    /// Adds `scale * input` into `target` using the selected backend.
+    #[doc(hidden)]
+    fn selected_iq_add_scaled_in_place(target: &mut [Complex<Self>], scale: Complex<Self>, input: &[Complex<Self>]);
+
+    /// Writes `left * right` into `output` using the selected backend.
+    #[doc(hidden)]
+    fn selected_iq_multiply_to(left: &[Complex<Self>], right: &[Complex<Self>], output: &mut [Complex<Self>]);
+
+    /// Writes `conjugate(left) * right` into `output` using the selected backend.
+    #[doc(hidden)]
+    fn selected_iq_conjugate_multiply_to(left: &[Complex<Self>], right: &[Complex<Self>], output: &mut [Complex<Self>]);
+
+    /// Returns the selected-backend sum of `conjugate(left) * right`.
+    #[doc(hidden)]
+    fn selected_iq_conjugate_multiply_sum(left: &[Complex<Self>], right: &[Complex<Self>]) -> Complex<Self>;
+
+    /// Returns the selected-backend sum of squared magnitudes.
+    #[doc(hidden)]
+    fn selected_iq_sum_squared_magnitudes(input: &[Complex<Self>]) -> Self;
+
+    /// Writes selected-backend per-sample magnitudes into `output`.
+    #[doc(hidden)]
+    fn selected_iq_calculate_magnitudes_to(input: &[Complex<Self>], output: &mut [Self]);
+
+    /// Writes a selected-backend direct IQ convolution range into `output`.
+    #[doc(hidden)]
+    fn selected_iq_convolve_range_to(input: &[Complex<Self>], kernel: &[Complex<Self>], full_output_start: usize, output: &mut [Complex<Self>]);
+}
+
+impl IqSample for f32 {
+    fn iq_lanes_for_backend(backend: SimdBackend) -> usize {
+        backend.iq_lanes_f32()
+    }
+
+    fn selected_iq_add_to(left: &[Complex<Self>], right: &[Complex<Self>], output: &mut [Complex<Self>]) {
+        <SelectedBackend as IqBackend>::iq_add_to(left, right, output);
+    }
+
+    fn selected_iq_add_in_place(target: &mut [Complex<Self>], input: &[Complex<Self>]) {
+        <SelectedBackend as IqBackend>::iq_add_in_place(target, input);
+    }
+
+    fn selected_iq_scale_in_place(target: &mut [Complex<Self>], scale: Self) {
+        <SelectedBackend as IqBackend>::iq_scale_in_place(target, scale);
+    }
+
+    fn selected_iq_add_scaled_in_place(target: &mut [Complex<Self>], scale: Complex<Self>, input: &[Complex<Self>]) {
+        <SelectedBackend as IqBackend>::iq_add_scaled_in_place(target, scale, input);
+    }
+
+    fn selected_iq_multiply_to(left: &[Complex<Self>], right: &[Complex<Self>], output: &mut [Complex<Self>]) {
+        <SelectedBackend as IqBackend>::iq_multiply_to(left, right, output);
+    }
+
+    fn selected_iq_conjugate_multiply_to(left: &[Complex<Self>], right: &[Complex<Self>], output: &mut [Complex<Self>]) {
+        <SelectedBackend as IqBackend>::iq_conjugate_multiply_to(left, right, output);
+    }
+
+    fn selected_iq_conjugate_multiply_sum(left: &[Complex<Self>], right: &[Complex<Self>]) -> Complex<Self> {
+        <SelectedBackend as IqBackend>::iq_conjugate_multiply_sum(left, right)
+    }
+
+    fn selected_iq_sum_squared_magnitudes(input: &[Complex<Self>]) -> Self {
+        <SelectedBackend as IqBackend>::iq_sum_squared_magnitudes(input)
+    }
+
+    fn selected_iq_calculate_magnitudes_to(input: &[Complex<Self>], output: &mut [Self]) {
+        <SelectedBackend as IqBackend>::iq_calculate_magnitudes_to(input, output);
+    }
+
+    fn selected_iq_convolve_range_to(input: &[Complex<Self>], kernel: &[Complex<Self>], full_output_start: usize, output: &mut [Complex<Self>]) {
+        <SelectedBackend as IqBackend>::iq_convolve_range_to(input, kernel, full_output_start, output);
+    }
+}
+
+impl IqSample for f64 {
+    fn iq_lanes_for_backend(backend: SimdBackend) -> usize {
+        backend.iq_lanes_f64()
+    }
+
+    fn selected_iq_add_to(left: &[Complex<Self>], right: &[Complex<Self>], output: &mut [Complex<Self>]) {
+        <SelectedBackend as IqBackendF64>::iq_add_to(left, right, output);
+    }
+
+    fn selected_iq_add_in_place(target: &mut [Complex<Self>], input: &[Complex<Self>]) {
+        <SelectedBackend as IqBackendF64>::iq_add_in_place(target, input);
+    }
+
+    fn selected_iq_scale_in_place(target: &mut [Complex<Self>], scale: Self) {
+        <SelectedBackend as IqBackendF64>::iq_scale_in_place(target, scale);
+    }
+
+    fn selected_iq_add_scaled_in_place(target: &mut [Complex<Self>], scale: Complex<Self>, input: &[Complex<Self>]) {
+        <SelectedBackend as IqBackendF64>::iq_add_scaled_in_place(target, scale, input);
+    }
+
+    fn selected_iq_multiply_to(left: &[Complex<Self>], right: &[Complex<Self>], output: &mut [Complex<Self>]) {
+        <SelectedBackend as IqBackendF64>::iq_multiply_to(left, right, output);
+    }
+
+    fn selected_iq_conjugate_multiply_to(left: &[Complex<Self>], right: &[Complex<Self>], output: &mut [Complex<Self>]) {
+        <SelectedBackend as IqBackendF64>::iq_conjugate_multiply_to(left, right, output);
+    }
+
+    fn selected_iq_conjugate_multiply_sum(left: &[Complex<Self>], right: &[Complex<Self>]) -> Complex<Self> {
+        <SelectedBackend as IqBackendF64>::iq_conjugate_multiply_sum(left, right)
+    }
+
+    fn selected_iq_sum_squared_magnitudes(input: &[Complex<Self>]) -> Self {
+        <SelectedBackend as IqBackendF64>::iq_sum_squared_magnitudes(input)
+    }
+
+    fn selected_iq_calculate_magnitudes_to(input: &[Complex<Self>], output: &mut [Self]) {
+        <SelectedBackend as IqBackendF64>::iq_calculate_magnitudes_to(input, output);
+    }
+
+    fn selected_iq_convolve_range_to(input: &[Complex<Self>], kernel: &[Complex<Self>], full_output_start: usize, output: &mut [Complex<Self>]) {
+        <SelectedBackend as IqBackendF64>::iq_convolve_range_to(input, kernel, full_output_start, output);
+    }
+}
+
+mod private {
+    /// Seals the public SIMD sample trait to crate-supported scalar types.
+    pub trait Sealed {}
+
+    impl Sealed for f32 {}
+    impl Sealed for f64 {}
+}
+
+/// Returns a plan for the backend selected at compile time.
+pub const fn selected_iq_vector_plan() -> IqVectorPlan {
+    IqVectorPlan::selected()
+}
+
+/// Writes `left + right` into `output` without allocating.
+pub fn iq_add_to<T: IqSample>(left: &[Complex<T>], right: &[Complex<T>], output: &mut [Complex<T>]) {
+    assert_binary_output_len(left, right, output);
+    T::selected_iq_add_to(left, right, output);
+}
+
+/// Adds `input` into `target` without allocating.
+pub fn iq_add_in_place<T: IqSample>(target: &mut [Complex<T>], input: &[Complex<T>]) {
+    assert_equal_len(target, input, "target", "input");
+    T::selected_iq_add_in_place(target, input);
+}
+
+/// Scales `target` by `scale` without allocating.
+pub fn iq_scale_in_place<T: IqSample>(target: &mut [Complex<T>], scale: T) {
+    T::selected_iq_scale_in_place(target, scale);
+}
+
+/// Adds `scale * input` into `target` without allocating.
+pub fn iq_add_scaled_in_place<T: IqSample>(target: &mut [Complex<T>], scale: Complex<T>, input: &[Complex<T>]) {
+    assert_equal_len(target, input, "target", "input");
+    T::selected_iq_add_scaled_in_place(target, scale, input);
+}
+
+/// Writes `left * right` into `output` without allocating.
+pub fn iq_multiply_to<T: IqSample>(left: &[Complex<T>], right: &[Complex<T>], output: &mut [Complex<T>]) {
+    assert_binary_output_len(left, right, output);
+    T::selected_iq_multiply_to(left, right, output);
+}
+
+/// Writes `conjugate(left) * right` into `output` without allocating.
+pub fn iq_conjugate_multiply_to<T: IqSample>(left: &[Complex<T>], right: &[Complex<T>], output: &mut [Complex<T>]) {
+    assert_binary_output_len(left, right, output);
+    T::selected_iq_conjugate_multiply_to(left, right, output);
+}
+
+/// Returns the sum of `conjugate(left) * right` for each pair of IQ samples.
+pub fn iq_conjugate_multiply_sum<T: IqSample>(left: &[Complex<T>], right: &[Complex<T>]) -> Complex<T> {
+    assert_equal_len(left, right, "left", "right");
+    T::selected_iq_conjugate_multiply_sum(left, right)
+}
+
+/// Returns the sum of squared magnitudes for all IQ samples.
+pub fn iq_sum_squared_magnitudes<T: IqSample>(input: &[Complex<T>]) -> T {
+    T::selected_iq_sum_squared_magnitudes(input)
+}
+
+/// Writes per-sample magnitudes into `output` without allocating.
+pub fn iq_calculate_magnitudes_to<T: IqSample>(input: &[Complex<T>], output: &mut [T]) {
+    assert_output_len(input.len(), output.len(), "magnitude output");
+    T::selected_iq_calculate_magnitudes_to(input, output);
+}
+
+/// Writes the full direct IQ convolution into `output` without allocating.
+///
+/// # Panics
+/// Panics when `input` or `kernel` is empty, or when `output.len()` is not
+/// `input.len() + kernel.len() - 1`.
+pub fn iq_convolve_full_to<T: IqSample>(input: &[Complex<T>], kernel: &[Complex<T>], output: &mut [Complex<T>]) {
+    assert_full_convolution_output_len(input, kernel, output);
+    T::selected_iq_convolve_range_to(input, kernel, 0, output);
+}
+
+/// Writes a direct IQ convolution range from the full output into `output`.
+pub(crate) fn iq_convolve_range_to<T: IqSample>(
+    input: &[Complex<T>],
+    kernel: &[Complex<T>],
+    full_output_start: usize,
+    output: &mut [Complex<T>],
+) {
+    assert_convolution_range(input, kernel, full_output_start, output.len());
+    T::selected_iq_convolve_range_to(input, kernel, full_output_start, output);
+}
+
+/// Frequency shifts IQ blocks while preserving phase across calls.
+#[derive(Debug, Clone)]
+pub struct FrequencyShifter<T = f32> {
+    radians_per_sample: T,
+    phase: T,
+    oscillator: Vec<Complex<T>>,
+    scratch: Vec<Complex<T>>,
+}
+
+impl<T: IqSample> FrequencyShifter<T> {
+    /// Creates a frequency shifter from offset and sample-rate values in hertz.
+    pub fn new(freq_offset_hz: T, sample_rate_hz: T) -> Self {
+        assert!(sample_rate_hz > T::zero(), "sample_rate_hz must be positive");
+        Self {
+            radians_per_sample: T::from(std::f64::consts::TAU).unwrap() * freq_offset_hz / sample_rate_hz,
+            phase: T::zero(),
+            oscillator: Vec::new(),
+            scratch: Vec::new(),
+        }
+    }
+
+    /// Returns the current oscillator phase in radians.
+    pub fn phase(&self) -> T {
+        self.phase
+    }
+
+    /// Shifts a block in place and preserves phase for the next block.
+    pub fn process_block(&mut self, samples: &mut [Complex<T>]) {
+        if samples.is_empty() {
+            return;
+        }
+        self.fill_oscillator(samples.len());
+        self.scratch.clear();
+        self.scratch.extend_from_slice(samples);
+        iq_multiply_to(&self.scratch, &self.oscillator, samples);
+    }
+
+    /// Fills the reusable oscillator buffer for one output block.
+    fn fill_oscillator(&mut self, len: usize) {
+        self.oscillator.clear();
+        self.oscillator.reserve(len);
+        let mut phase = self.phase;
+        for _ in 0..len {
+            self.oscillator.push(unit_complex(phase));
+            phase = wrap_phase(phase + self.radians_per_sample);
+        }
+        self.phase = phase;
+    }
+}
+
+/// Applies a complex FIR filter while preserving delay state across calls.
+#[derive(Debug, Clone)]
+pub struct FirFilter<T = f32> {
+    taps: Vec<Complex<T>>,
+    delay: Vec<Complex<T>>,
+    reversed_taps: Vec<Complex<T>>,
+    history: Vec<Complex<T>>,
+    input_scratch: Vec<Complex<T>>,
+}
+
+impl<T: IqSample> FirFilter<T> {
+    /// Creates a streaming FIR filter with `taps[0]` applied to the current sample.
+    pub fn new(taps: Vec<Complex<T>>) -> Self {
+        assert!(!taps.is_empty(), "taps must not be empty");
+        let delay = vec![zero_complex(); taps.len() - 1];
+        let reversed_taps = taps.iter().rev().copied().collect();
+        Self {
+            taps,
+            delay,
+            reversed_taps,
+            history: Vec::new(),
+            input_scratch: Vec::new(),
+        }
+    }
+
+    /// Returns the FIR tap slice.
+    pub fn taps(&self) -> &[Complex<T>] {
+        &self.taps
+    }
+
+    /// Returns the current delay-state slice with the newest sample first.
+    pub fn delay(&self) -> &[Complex<T>] {
+        &self.delay
+    }
+
+    /// Filters `input` into `output` while preserving delay state.
+    pub fn process_block_to(&mut self, input: &[Complex<T>], output: &mut [Complex<T>]) {
+        assert_output_len(input.len(), output.len(), "fir output");
+        self.write_history(input);
+        self.write_block_output(output);
+        self.update_delay_from_history();
+    }
+
+    /// Filters a block in place while preserving delay state.
+    pub fn process_block_in_place(&mut self, samples: &mut [Complex<T>]) {
+        self.input_scratch.clear();
+        self.input_scratch.extend_from_slice(samples);
+        self.write_history_from_scratch();
+        self.write_block_output(samples);
+        self.update_delay_from_history();
+    }
+
+    /// Filters one sample and advances the delay line.
+    pub fn process_sample(&mut self, sample: Complex<T>) -> Complex<T> {
+        let output = self.calculate_output(sample);
+        self.push_delay(sample);
+        output
+    }
+
+    /// Calculates the FIR output for one sample using the current delay line.
+    fn calculate_output(&self, sample: Complex<T>) -> Complex<T> {
+        let mut sum = self.taps[0] * sample;
+        for (tap, delayed_sample) in self.taps.iter().skip(1).zip(self.delay.iter()) {
+            sum = sum + *tap * *delayed_sample;
+        }
+        sum
+    }
+
+    /// Pushes one sample into the delay line.
+    fn push_delay(&mut self, sample: Complex<T>) {
+        if self.delay.is_empty() {
+            return;
+        }
+        self.delay.rotate_right(1);
+        self.delay[0] = sample;
+    }
+
+    /// Builds chronological history from the delay line and input slice.
+    fn write_history(&mut self, input: &[Complex<T>]) {
+        self.history.clear();
+        self.history.extend(self.delay.iter().rev().copied());
+        self.history.extend_from_slice(input);
+    }
+
+    /// Builds chronological history from the reusable in-place scratch buffer.
+    fn write_history_from_scratch(&mut self) {
+        self.history.clear();
+        self.history.extend(self.delay.iter().rev().copied());
+        self.history.extend_from_slice(&self.input_scratch);
+    }
+
+    /// Writes the current history block through the SIMD convolution kernel.
+    fn write_block_output(&mut self, output: &mut [Complex<T>]) {
+        if output.is_empty() {
+            return;
+        }
+        iq_convolve_range_to(&self.history, &self.reversed_taps, self.taps.len() - 1, output);
+    }
+
+    /// Copies the newest samples from chronological history into delay order.
+    fn update_delay_from_history(&mut self) {
+        if self.delay.is_empty() {
+            return;
+        }
+        let delay_start = self.history.len() - self.delay.len();
+        for (delay_sample, history_sample) in self.delay.iter_mut().zip(self.history[delay_start..].iter().rev()) {
+            *delay_sample = *history_sample;
+        }
+    }
+}
+
+trait IqBackend {
+    /// Writes `left + right` into `output`.
+    fn iq_add_to(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]);
+
+    /// Adds `input` into `target`.
+    fn iq_add_in_place(target: &mut [Complex<f32>], input: &[Complex<f32>]);
+
+    /// Scales `target` by `scale`.
+    fn iq_scale_in_place(target: &mut [Complex<f32>], scale: f32);
+
+    /// Adds `scale * input` into `target`.
+    fn iq_add_scaled_in_place(target: &mut [Complex<f32>], scale: Complex<f32>, input: &[Complex<f32>]);
+
+    /// Writes `left * right` into `output`.
+    fn iq_multiply_to(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]);
+
+    /// Writes `conjugate(left) * right` into `output`.
+    fn iq_conjugate_multiply_to(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]);
+
+    /// Returns sum of `conjugate(left) * right`.
+    fn iq_conjugate_multiply_sum(left: &[Complex<f32>], right: &[Complex<f32>]) -> Complex<f32>;
+
+    /// Returns sum of squared magnitudes.
+    fn iq_sum_squared_magnitudes(input: &[Complex<f32>]) -> f32;
+
+    /// Writes per-sample magnitudes into `output`.
+    fn iq_calculate_magnitudes_to(input: &[Complex<f32>], output: &mut [f32]);
+
+    /// Writes a direct IQ convolution range into `output`.
+    fn iq_convolve_range_to(input: &[Complex<f32>], kernel: &[Complex<f32>], full_output_start: usize, output: &mut [Complex<f32>]);
+}
+
+trait IqBackendF64 {
+    /// Writes `left + right` into `output`.
+    fn iq_add_to(left: &[Complex<f64>], right: &[Complex<f64>], output: &mut [Complex<f64>]);
+
+    /// Adds `input` into `target`.
+    fn iq_add_in_place(target: &mut [Complex<f64>], input: &[Complex<f64>]);
+
+    /// Scales `target` by `scale`.
+    fn iq_scale_in_place(target: &mut [Complex<f64>], scale: f64);
+
+    /// Adds `scale * input` into `target`.
+    fn iq_add_scaled_in_place(target: &mut [Complex<f64>], scale: Complex<f64>, input: &[Complex<f64>]);
+
+    /// Writes `left * right` into `output`.
+    fn iq_multiply_to(left: &[Complex<f64>], right: &[Complex<f64>], output: &mut [Complex<f64>]);
+
+    /// Writes `conjugate(left) * right` into `output`.
+    fn iq_conjugate_multiply_to(left: &[Complex<f64>], right: &[Complex<f64>], output: &mut [Complex<f64>]);
+
+    /// Returns sum of `conjugate(left) * right`.
+    fn iq_conjugate_multiply_sum(left: &[Complex<f64>], right: &[Complex<f64>]) -> Complex<f64>;
+
+    /// Returns sum of squared magnitudes.
+    fn iq_sum_squared_magnitudes(input: &[Complex<f64>]) -> f64;
+
+    /// Writes per-sample magnitudes into `output`.
+    fn iq_calculate_magnitudes_to(input: &[Complex<f64>], output: &mut [f64]);
+
+    /// Writes a direct IQ convolution range into `output`.
+    fn iq_convolve_range_to(input: &[Complex<f64>], kernel: &[Complex<f64>], full_output_start: usize, output: &mut [Complex<f64>]);
+}
+
+/// Returns the build-selected backend as a const value.
+const fn selected_backend() -> SimdBackend {
+    #[cfg(signal_kit_simd_avx512)]
+    {
+        return SimdBackend::Avx512F;
+    }
+    #[cfg(signal_kit_simd_avx2)]
+    {
+        return SimdBackend::Avx2Fma;
+    }
+    #[cfg(signal_kit_simd_sse2)]
+    {
+        return SimdBackend::Sse2;
+    }
+    #[allow(unreachable_code)]
+    SimdBackend::Scalar
+}
+
+/// Asserts that two input slices and one output slice have matching lengths.
+fn assert_binary_output_len<T>(left: &[Complex<T>], right: &[Complex<T>], output: &[Complex<T>]) {
+    assert_equal_len(left, right, "left", "right");
+    assert_output_len(left.len(), output.len(), "output");
+}
+
+/// Asserts that two slices have matching lengths.
+fn assert_equal_len<T, U>(left: &[T], right: &[U], left_name: &str, right_name: &str) {
+    assert_eq!(left.len(), right.len(), "{left_name} and {right_name} lengths must match");
+}
+
+/// Asserts that an output length matches the expected length.
+fn assert_output_len(expected: usize, actual: usize, output_name: &str) {
+    assert_eq!(expected, actual, "{output_name} length must match input length");
+}
+
+/// Asserts that the full convolution output length is exact.
+fn assert_full_convolution_output_len<T>(input: &[Complex<T>], kernel: &[Complex<T>], output: &[Complex<T>]) {
+    let expected = full_convolution_len(input.len(), kernel.len());
+    assert_eq!(
+        expected,
+        output.len(),
+        "full convolution output length must equal input.len() + kernel.len() - 1"
+    );
+}
+
+/// Asserts that a convolution range fits inside the full output.
+fn assert_convolution_range<T>(input: &[Complex<T>], kernel: &[Complex<T>], full_output_start: usize, output_len: usize) {
+    let full_len = full_convolution_len(input.len(), kernel.len());
+    let range_end = full_output_start
+        .checked_add(output_len)
+        .expect("convolution output range length overflowed");
+    assert!(range_end <= full_len, "convolution output range must fit within full output");
+}
+
+/// Returns the full convolution output length.
+fn full_convolution_len(input_len: usize, kernel_len: usize) -> usize {
+    assert!(input_len > 0, "input must not be empty");
+    assert!(kernel_len > 0, "kernel must not be empty");
+    input_len
+        .checked_add(kernel_len)
+        .and_then(|length| length.checked_sub(1))
+        .expect("full convolution length overflowed")
+}
+
+/// Writes each requested convolution output using an overlap summation function.
+fn write_convolution_range_to<T, SumOverlap>(
+    input: &[Complex<T>],
+    kernel: &[Complex<T>],
+    full_output_start: usize,
+    output: &mut [Complex<T>],
+    mut sum_overlap: SumOverlap,
+) where
+    T: IqSample,
+    SumOverlap: FnMut(&[Complex<T>], &[Complex<T>]) -> Complex<T>,
 {
-    /// Generic SIMD batch processor for vector-vector operations
-    fn process_simd_batches<B>(
-        &self,
-        other: &VectorSimd<T>,
-        batch_op: impl Fn(B, B) -> B,
-        scalar_op: impl Fn(T, T) -> T,
-    ) -> VectorSimd<T>
-    where
-        B: SimdBatch<Scalar = T> + Pod,
-    {
-        assert_eq!(
-            self.len(),
-            other.len(),
-            "Vector sizes must match for element-wise operations"
-        );
+    for (output_offset, output_sample) in output.iter_mut().enumerate() {
+        let full_output_index = full_output_start + output_offset;
+        let (input_overlap, kernel_overlap) = convolution_overlap_slices(input, kernel, full_output_index);
+        *output_sample = sum_overlap(input_overlap, kernel_overlap);
+    }
+}
 
-        // Allocate without initialization for better performance
-        let mut result = Vec::with_capacity(self.len());
-        unsafe {
-            result.set_len(self.len());
+/// Returns the overlapping input and kernel slices for one full output index.
+fn convolution_overlap_slices<'input, 'kernel, T: IqSample>(
+    input: &'input [Complex<T>],
+    kernel: &'kernel [Complex<T>],
+    full_index: usize,
+) -> (&'input [Complex<T>], &'kernel [Complex<T>]) {
+    let overlap = convolution_overlap(full_index, input.len(), kernel.len());
+    let input_end = overlap.input_start + overlap.len;
+    let kernel_end = overlap.kernel_start + overlap.len;
+    (&input[overlap.input_start..input_end], &kernel[overlap.kernel_start..kernel_end])
+}
+
+/// Returns the overlap geometry for one full convolution output index.
+fn convolution_overlap(full_index: usize, input_len: usize, kernel_len: usize) -> ConvolutionOverlap {
+    let kernel_start = (kernel_len - 1).saturating_sub(full_index);
+    let kernel_end = kernel_overlap_end(full_index, input_len, kernel_len);
+    ConvolutionOverlap {
+        input_start: full_index + kernel_start + 1 - kernel_len,
+        kernel_start,
+        len: kernel_end - kernel_start,
+    }
+}
+
+/// Returns the exclusive kernel overlap end for one full output index.
+fn kernel_overlap_end(full_index: usize, input_len: usize, kernel_len: usize) -> usize {
+    let full_len = input_len + kernel_len - 1;
+    kernel_len.min(full_len - full_index)
+}
+
+/// Stores contiguous overlap geometry for direct convolution.
+#[derive(Debug, Clone, Copy)]
+struct ConvolutionOverlap {
+    input_start: usize,
+    kernel_start: usize,
+    len: usize,
+}
+
+/// Sums an interleaved `[re, im, ...]` slice into one complex value.
+fn sum_interleaved_complex_lanes<T: IqSample>(values: &[T]) -> Complex<T> {
+    let mut sum = zero_complex::<T>();
+    for lane in values.chunks_exact(2) {
+        sum = sum + Complex::new(lane[0], lane[1]);
+    }
+    sum
+}
+
+/// Multiplies the conjugate of `left` by `right`.
+fn conjugate_multiply_sample<T: IqSample>(left: Complex<T>, right: Complex<T>) -> Complex<T> {
+    Complex::new(left.re * right.re + left.im * right.im, left.re * right.im - left.im * right.re)
+}
+
+/// Builds a zero complex sample.
+fn zero_complex<T: IqSample>() -> Complex<T> {
+    Complex::new(T::zero(), T::zero())
+}
+
+/// Casts complex f32 samples to their interleaved f32 representation.
+fn as_f32_slice(input: &[Complex<f32>]) -> &[f32] {
+    cast_slice(input)
+}
+
+/// Casts mutable complex f32 samples to their interleaved f32 representation.
+fn as_f32_slice_mut(input: &mut [Complex<f32>]) -> &mut [f32] {
+    cast_slice_mut(input)
+}
+
+/// Casts complex f64 samples to their interleaved f64 representation.
+fn as_f64_slice(input: &[Complex<f64>]) -> &[f64] {
+    cast_slice(input)
+}
+
+/// Casts mutable complex f64 samples to their interleaved f64 representation.
+fn as_f64_slice_mut(input: &mut [Complex<f64>]) -> &mut [f64] {
+    cast_slice_mut(input)
+}
+
+/// Returns the largest vectorized prefix length for a lane count.
+fn vectorized_end(len: usize, lanes: usize) -> usize {
+    len - (len % lanes)
+}
+
+/// Builds a unit complex value for the provided phase.
+fn unit_complex<T: IqSample>(phase: T) -> Complex<T> {
+    let (sin_phase, cos_phase) = phase.sin_cos();
+    Complex::new(cos_phase, sin_phase)
+}
+
+/// Wraps phase into one turn to keep oscillator state bounded.
+fn wrap_phase<T: IqSample>(phase: T) -> T {
+    let turn = T::from(std::f64::consts::TAU).unwrap();
+    let wrapped = phase % turn;
+    if wrapped < T::zero() { wrapped + turn } else { wrapped }
+}
+
+mod scalar {
+    #![allow(dead_code)]
+
+    use super::*;
+
+    /// Scalar backend marker.
+    pub(super) struct ScalarBackend;
+
+    impl IqBackend for ScalarBackend {
+        fn iq_add_to(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]) {
+            iq_add_to(left, right, output);
         }
 
-        let lanes = B::LANES;
-        let simd_end = (self.len() / lanes) * lanes;
-
-        // Process SIMD batches using zero-copy cast_slice
-        let a_simd: &[B] = cast_slice(&self.data[..simd_end]);
-        let b_simd: &[B] = cast_slice(&other.data[..simd_end]);
-        let result_simd: &mut [B] = cast_slice_mut(&mut result[..simd_end]);
-
-        // Use iterator-based approach for better optimization
-        result_simd.iter_mut()
-            .zip(a_simd.iter().zip(b_simd.iter()))
-            .for_each(|(r, (a, b))| *r = batch_op(*a, *b));
-
-        // Process remainder with scalar operations
-        for i in simd_end..self.len() {
-            result[i] = scalar_op(self.data[i], other.data[i]);
+        fn iq_add_in_place(target: &mut [Complex<f32>], input: &[Complex<f32>]) {
+            iq_add_in_place(target, input);
         }
 
-        VectorSimd { data: result }
-    }
-
-    /// Generic SIMD batch processor for vector-scalar operations
-    fn process_simd_batches_scalar<B>(
-        &self,
-        scalar: T,
-        batch_op: impl Fn(B, B) -> B,
-        scalar_op: impl Fn(T, T) -> T,
-    ) -> VectorSimd<T>
-    where
-        B: SimdBatch<Scalar = T> + Pod,
-    {
-        // Allocate without initialization for better performance
-        let mut result = Vec::with_capacity(self.len());
-        unsafe {
-            result.set_len(self.len());
+        fn iq_scale_in_place(target: &mut [Complex<f32>], scale: f32) {
+            iq_scale_in_place(target, scale);
         }
 
-        let lanes = B::LANES;
-        let simd_end = (self.len() / lanes) * lanes;
-        let scalar_batch = B::splat(scalar);
-
-        // Process SIMD batches using zero-copy cast_slice
-        let a_simd: &[B] = cast_slice(&self.data[..simd_end]);
-        let result_simd: &mut [B] = cast_slice_mut(&mut result[..simd_end]);
-
-        // Use iterator-based approach for better optimization
-        result_simd.iter_mut()
-            .zip(a_simd.iter())
-            .for_each(|(r, a)| *r = batch_op(*a, scalar_batch));
-
-        // Process remainder
-        for i in simd_end..self.len() {
-            result[i] = scalar_op(self.data[i], scalar);
+        fn iq_add_scaled_in_place(target: &mut [Complex<f32>], scale: Complex<f32>, input: &[Complex<f32>]) {
+            iq_add_scaled_in_place(target, scale, input);
         }
 
-        VectorSimd { data: result }
-    }
-
-    /// Generic SIMD batch processor for in-place vector-scalar operations
-    fn process_simd_batches_scalar_inplace<B>(
-        &mut self,
-        scalar: T,
-        batch_op: impl Fn(B, B) -> B,
-        scalar_op: impl Fn(T, T) -> T,
-    )
-    where
-        B: SimdBatch<Scalar = T> + Pod,
-    {
-        let lanes = B::LANES;
-        let simd_end = (self.len() / lanes) * lanes;
-        let scalar_batch = B::splat(scalar);
-
-        // Process SIMD batches using zero-copy cast_slice
-        let data_simd: &mut [B] = cast_slice_mut(&mut self.data[..simd_end]);
-
-        // Use iterator-based approach for better optimization
-        data_simd.iter_mut()
-            .for_each(|d| *d = batch_op(*d, scalar_batch));
-
-        // Process remainder
-        for i in simd_end..self.len() {
-            self.data[i] = scalar_op(self.data[i], scalar);
-        }
-    }
-}
-
-// ============================================================================
-// f32 SIMD Operations
-// ============================================================================
-
-impl VectorSimd<f32> {
-    /// Creates a VectorSimd with evenly spaced values (linspace)
-    pub fn linspace(start: f32, stop: f32, length: usize) -> Self {
-        if length == 0 {
-            return Self::new();
-        }
-        if length == 1 {
-            return Self::from_vec(vec![start]);
+        fn iq_multiply_to(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]) {
+            iq_multiply_to(left, right, output);
         }
 
-        let step = (stop - start) / (length as f32 - 1.0);
-        let data: Vec<f32> = (0..length)
-            .map(|i| start + (i as f32) * step)
-            .collect();
-        Self { data }
-    }
-}
-
-// Implement Add trait for VectorSimd<f32>
-impl Add for VectorSimd<f32> {
-    type Output = VectorSimd<f32>;
-
-    fn add(self, rhs: Self) -> Self::Output {
-        use simd_config::F32Batch;
-        self.process_simd_batches::<F32Batch>(
-            &rhs,
-            |a, b| SimdBatch::add(a, b),
-            |a, b| a + b,
-        )
-    }
-}
-
-impl Add for &VectorSimd<f32> {
-    type Output = VectorSimd<f32>;
-
-    fn add(self, rhs: Self) -> Self::Output {
-        use simd_config::F32Batch;
-        self.process_simd_batches::<F32Batch>(
-            rhs,
-            |a, b| SimdBatch::add(a, b),
-            |a, b| a + b,
-        )
-    }
-}
-
-// Implement Sub trait for VectorSimd<f32>
-impl Sub for VectorSimd<f32> {
-    type Output = VectorSimd<f32>;
-
-    fn sub(self, rhs: Self) -> Self::Output {
-        use simd_config::F32Batch;
-        self.process_simd_batches::<F32Batch>(
-            &rhs,
-            |a, b| SimdBatch::sub(a, b),
-            |a, b| a - b,
-        )
-    }
-}
-
-impl Sub for &VectorSimd<f32> {
-    type Output = VectorSimd<f32>;
-
-    fn sub(self, rhs: Self) -> Self::Output {
-        use simd_config::F32Batch;
-        self.process_simd_batches::<F32Batch>(
-            rhs,
-            |a, b| SimdBatch::sub(a, b),
-            |a, b| a - b,
-        )
-    }
-}
-
-// Implement Mul trait for VectorSimd<f32>
-impl Mul for VectorSimd<f32> {
-    type Output = VectorSimd<f32>;
-
-    fn mul(self, rhs: Self) -> Self::Output {
-        use simd_config::F32Batch;
-        self.process_simd_batches::<F32Batch>(
-            &rhs,
-            |a, b| SimdBatch::mul(a, b),
-            |a, b| a * b,
-        )
-    }
-}
-
-impl Mul for &VectorSimd<f32> {
-    type Output = VectorSimd<f32>;
-
-    fn mul(self, rhs: Self) -> Self::Output {
-        use simd_config::F32Batch;
-        self.process_simd_batches::<F32Batch>(
-            rhs,
-            |a, b| SimdBatch::mul(a, b),
-            |a, b| a * b,
-        )
-    }
-}
-
-// Implement Div trait for VectorSimd<f32>
-impl Div for VectorSimd<f32> {
-    type Output = VectorSimd<f32>;
-
-    fn div(self, rhs: Self) -> Self::Output {
-        use simd_config::F32Batch;
-        self.process_simd_batches::<F32Batch>(
-            &rhs,
-            |a, b| SimdBatch::div(a, b),
-            |a, b| a / b,
-        )
-    }
-}
-
-impl Div for &VectorSimd<f32> {
-    type Output = VectorSimd<f32>;
-
-    fn div(self, rhs: Self) -> Self::Output {
-        use simd_config::F32Batch;
-        self.process_simd_batches::<F32Batch>(
-            rhs,
-            |a, b| SimdBatch::div(a, b),
-            |a, b| a / b,
-        )
-    }
-}
-
-// Scalar operations for f32
-impl Add<f32> for VectorSimd<f32> {
-    type Output = VectorSimd<f32>;
-
-    fn add(self, rhs: f32) -> Self::Output {
-        use simd_config::F32Batch;
-        self.process_simd_batches_scalar::<F32Batch>(
-            rhs,
-            |a, b| SimdBatch::add(a, b),
-            |a, b| a + b,
-        )
-    }
-}
-
-impl Add<f32> for &VectorSimd<f32> {
-    type Output = VectorSimd<f32>;
-
-    fn add(self, rhs: f32) -> Self::Output {
-        use simd_config::F32Batch;
-        self.process_simd_batches_scalar::<F32Batch>(
-            rhs,
-            |a, b| SimdBatch::add(a, b),
-            |a, b| a + b,
-        )
-    }
-}
-
-impl Sub<f32> for VectorSimd<f32> {
-    type Output = VectorSimd<f32>;
-
-    fn sub(self, rhs: f32) -> Self::Output {
-        use simd_config::F32Batch;
-        self.process_simd_batches_scalar::<F32Batch>(
-            rhs,
-            |a, b| SimdBatch::sub(a, b),
-            |a, b| a - b,
-        )
-    }
-}
-
-impl Sub<f32> for &VectorSimd<f32> {
-    type Output = VectorSimd<f32>;
-
-    fn sub(self, rhs: f32) -> Self::Output {
-        use simd_config::F32Batch;
-        self.process_simd_batches_scalar::<F32Batch>(
-            rhs,
-            |a, b| SimdBatch::sub(a, b),
-            |a, b| a - b,
-        )
-    }
-}
-
-impl Mul<f32> for VectorSimd<f32> {
-    type Output = VectorSimd<f32>;
-
-    fn mul(self, rhs: f32) -> Self::Output {
-        use simd_config::F32Batch;
-        self.process_simd_batches_scalar::<F32Batch>(
-            rhs,
-            |a, b| SimdBatch::mul(a, b),
-            |a, b| a * b,
-        )
-    }
-}
-
-impl Mul<f32> for &VectorSimd<f32> {
-    type Output = VectorSimd<f32>;
-
-    fn mul(self, rhs: f32) -> Self::Output {
-        use simd_config::F32Batch;
-        self.process_simd_batches_scalar::<F32Batch>(
-            rhs,
-            |a, b| SimdBatch::mul(a, b),
-            |a, b| a * b,
-        )
-    }
-}
-
-impl Div<f32> for VectorSimd<f32> {
-    type Output = VectorSimd<f32>;
-
-    fn div(self, rhs: f32) -> Self::Output {
-        use simd_config::F32Batch;
-        self.process_simd_batches_scalar::<F32Batch>(
-            rhs,
-            |a, b| SimdBatch::div(a, b),
-            |a, b| a / b,
-        )
-    }
-}
-
-impl Div<f32> for &VectorSimd<f32> {
-    type Output = VectorSimd<f32>;
-
-    fn div(self, rhs: f32) -> Self::Output {
-        use simd_config::F32Batch;
-        self.process_simd_batches_scalar::<F32Batch>(
-            rhs,
-            |a, b| SimdBatch::div(a, b),
-            |a, b| a / b,
-        )
-    }
-}
-
-// Compound assignment operations for f32
-impl AddAssign<f32> for VectorSimd<f32> {
-    fn add_assign(&mut self, rhs: f32) {
-        use simd_config::F32Batch;
-        self.process_simd_batches_scalar_inplace::<F32Batch>(
-            rhs,
-            |a, b| SimdBatch::add(a, b),
-            |a, b| a + b,
-        );
-    }
-}
-
-impl SubAssign<f32> for VectorSimd<f32> {
-    fn sub_assign(&mut self, rhs: f32) {
-        use simd_config::F32Batch;
-        self.process_simd_batches_scalar_inplace::<F32Batch>(
-            rhs,
-            |a, b| SimdBatch::sub(a, b),
-            |a, b| a - b,
-        );
-    }
-}
-
-impl MulAssign<f32> for VectorSimd<f32> {
-    fn mul_assign(&mut self, rhs: f32) {
-        use simd_config::F32Batch;
-        self.process_simd_batches_scalar_inplace::<F32Batch>(
-            rhs,
-            |a, b| SimdBatch::mul(a, b),
-            |a, b| a * b,
-        );
-    }
-}
-
-impl DivAssign<f32> for VectorSimd<f32> {
-    fn div_assign(&mut self, rhs: f32) {
-        use simd_config::F32Batch;
-        self.process_simd_batches_scalar_inplace::<F32Batch>(
-            rhs,
-            |a, b| SimdBatch::div(a, b),
-            |a, b| a / b,
-        );
-    }
-}
-
-// Special operations for f32
-impl VectorSimd<f32> {
-    /// Returns absolute values of all elements
-    pub fn abs(&self) -> VectorSimd<f32> {
-        use simd_config::F32Batch;
-
-        // Allocate without initialization for better performance
-        let mut result = Vec::with_capacity(self.len());
-        unsafe {
-            result.set_len(self.len());
+        fn iq_conjugate_multiply_to(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]) {
+            iq_conjugate_multiply_to(left, right, output);
         }
 
-        let lanes = F32Batch::LANES;
-        let simd_end = (self.len() / lanes) * lanes;
-
-        // Process SIMD batches using zero-copy cast_slice
-        let a_simd: &[F32Batch] = cast_slice(&self.data[..simd_end]);
-        let result_simd: &mut [F32Batch] = cast_slice_mut(&mut result[..simd_end]);
-
-        // Use iterator-based approach for better optimization
-        result_simd.iter_mut()
-            .zip(a_simd.iter())
-            .for_each(|(r, a)| *r = a.abs());
-
-        // Process remainder
-        for i in simd_end..self.len() {
-            result[i] = self.data[i].abs();
+        fn iq_conjugate_multiply_sum(left: &[Complex<f32>], right: &[Complex<f32>]) -> Complex<f32> {
+            iq_conjugate_multiply_sum(left, right)
         }
 
-        VectorSimd { data: result }
+        fn iq_sum_squared_magnitudes(input: &[Complex<f32>]) -> f32 {
+            iq_sum_squared_magnitudes(input)
+        }
+
+        fn iq_calculate_magnitudes_to(input: &[Complex<f32>], output: &mut [f32]) {
+            iq_calculate_magnitudes_to(input, output);
+        }
+
+        fn iq_convolve_range_to(input: &[Complex<f32>], kernel: &[Complex<f32>], full_output_start: usize, output: &mut [Complex<f32>]) {
+            iq_convolve_range_to(input, kernel, full_output_start, output);
+        }
     }
 
-    /// Simple convolution (direct method)
-    pub fn convolve_simple(&self, kernel: &VectorSimd<f32>) -> VectorSimd<f32> {
-        if kernel.size() > self.size() {
-            return VectorSimd::new();
+    impl IqBackendF64 for ScalarBackend {
+        fn iq_add_to(left: &[Complex<f64>], right: &[Complex<f64>], output: &mut [Complex<f64>]) {
+            iq_add_to_f64(left, right, output);
         }
 
-        let output_size = self.size() - kernel.size() + 1;
-        let mut result = vec![0.0f32; output_size];
-
-        for i in 0..output_size {
-            let mut sum = 0.0f32;
-            for j in 0..kernel.size() {
-                sum += self.data[i + j] * kernel.data[j];
-            }
-            result[i] = sum;
+        fn iq_add_in_place(target: &mut [Complex<f64>], input: &[Complex<f64>]) {
+            iq_add_in_place_f64(target, input);
         }
 
-        VectorSimd { data: result }
+        fn iq_scale_in_place(target: &mut [Complex<f64>], scale: f64) {
+            iq_scale_in_place_f64(target, scale);
+        }
+
+        fn iq_add_scaled_in_place(target: &mut [Complex<f64>], scale: Complex<f64>, input: &[Complex<f64>]) {
+            iq_add_scaled_in_place_f64(target, scale, input);
+        }
+
+        fn iq_multiply_to(left: &[Complex<f64>], right: &[Complex<f64>], output: &mut [Complex<f64>]) {
+            iq_multiply_to_f64(left, right, output);
+        }
+
+        fn iq_conjugate_multiply_to(left: &[Complex<f64>], right: &[Complex<f64>], output: &mut [Complex<f64>]) {
+            iq_conjugate_multiply_to_f64(left, right, output);
+        }
+
+        fn iq_conjugate_multiply_sum(left: &[Complex<f64>], right: &[Complex<f64>]) -> Complex<f64> {
+            iq_conjugate_multiply_sum_f64(left, right)
+        }
+
+        fn iq_sum_squared_magnitudes(input: &[Complex<f64>]) -> f64 {
+            iq_sum_squared_magnitudes_f64(input)
+        }
+
+        fn iq_calculate_magnitudes_to(input: &[Complex<f64>], output: &mut [f64]) {
+            iq_calculate_magnitudes_to_f64(input, output);
+        }
+
+        fn iq_convolve_range_to(input: &[Complex<f64>], kernel: &[Complex<f64>], full_output_start: usize, output: &mut [Complex<f64>]) {
+            iq_convolve_range_to_f64(input, kernel, full_output_start, output);
+        }
     }
 
-    /// SIMD-optimized convolution
-    pub fn convolve(&self, kernel: &VectorSimd<f32>) -> VectorSimd<f32> {
-        if kernel.size() > self.size() {
-            return VectorSimd::new();
+    /// Writes scalar complex additions into `output`.
+    pub(super) fn iq_add_to(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]) {
+        for ((left_sample, right_sample), output_sample) in left.iter().zip(right.iter()).zip(output.iter_mut()) {
+            *output_sample = *left_sample + *right_sample;
         }
+    }
 
-        use simd_config::F32Batch;
-        const LANES: usize = 4; // f32x4
-
-        let output_size = self.size() - kernel.size() + 1;
-        let mut result = vec![0.0f32; output_size];
-
-        let simd_chunks = output_size / LANES;
-
-        // Process LANES output samples at a time
-        for chunk_idx in 0..simd_chunks {
-            let base_idx = chunk_idx * LANES;
-            let mut accum = F32Batch::zero();
-
-            // For each kernel tap (using load since base_idx + k may not be aligned)
-            for k in 0..kernel.size() {
-                let sig = F32Batch::load(&self.data[base_idx + k..]);
-                let kern = F32Batch::splat(kernel.data[k]);
-                accum = SimdBatch::add(accum, SimdBatch::mul(sig, kern));
-            }
-
-            // Use cast_slice_mut for zero-copy store (base_idx is always aligned to LANES)
-            let result_simd: &mut [F32Batch] = cast_slice_mut(&mut result[base_idx..base_idx + LANES]);
-            result_simd[0] = accum;
+    /// Adds scalar complex samples into `target`.
+    pub(super) fn iq_add_in_place(target: &mut [Complex<f32>], input: &[Complex<f32>]) {
+        for (target_sample, input_sample) in target.iter_mut().zip(input.iter()) {
+            *target_sample += *input_sample;
         }
+    }
 
-        // Handle remaining elements
-        for i in (simd_chunks * LANES)..output_size {
-            let mut sum = 0.0f32;
-            for j in 0..kernel.size() {
-                sum += self.data[i + j] * kernel.data[j];
-            }
-            result[i] = sum;
+    /// Scales scalar complex samples in place.
+    pub(super) fn iq_scale_in_place(target: &mut [Complex<f32>], scale: f32) {
+        for target_sample in target {
+            *target_sample *= scale;
         }
+    }
 
-        VectorSimd { data: result }
+    /// Adds scalar `scale * input` products into `target`.
+    pub(super) fn iq_add_scaled_in_place(target: &mut [Complex<f32>], scale: Complex<f32>, input: &[Complex<f32>]) {
+        for (target_sample, input_sample) in target.iter_mut().zip(input.iter()) {
+            *target_sample += scale * *input_sample;
+        }
+    }
+
+    /// Writes scalar complex products into `output`.
+    pub(super) fn iq_multiply_to(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]) {
+        for ((left_sample, right_sample), output_sample) in left.iter().zip(right.iter()).zip(output.iter_mut()) {
+            *output_sample = *left_sample * *right_sample;
+        }
+    }
+
+    /// Writes scalar conjugate-multiply products into `output`.
+    pub(super) fn iq_conjugate_multiply_to(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]) {
+        for ((left_sample, right_sample), output_sample) in left.iter().zip(right.iter()).zip(output.iter_mut()) {
+            *output_sample = conjugate_multiply_sample(*left_sample, *right_sample);
+        }
+    }
+
+    /// Returns a scalar sum of conjugate-multiply products.
+    pub(super) fn iq_conjugate_multiply_sum(left: &[Complex<f32>], right: &[Complex<f32>]) -> Complex<f32> {
+        conjugate_multiply_sum_tail(left, right, 0)
+    }
+
+    /// Returns a scalar sum of squared magnitudes.
+    pub(super) fn iq_sum_squared_magnitudes(input: &[Complex<f32>]) -> f32 {
+        input.iter().map(|sample| sample.norm_sqr()).sum()
+    }
+
+    /// Writes scalar magnitudes into `output`.
+    pub(super) fn iq_calculate_magnitudes_to(input: &[Complex<f32>], output: &mut [f32]) {
+        for (sample, output_sample) in input.iter().zip(output.iter_mut()) {
+            *output_sample = sample.norm();
+        }
+    }
+
+    /// Writes scalar direct convolution outputs into `output`.
+    pub(super) fn iq_convolve_range_to(input: &[Complex<f32>], kernel: &[Complex<f32>], full_output_start: usize, output: &mut [Complex<f32>]) {
+        write_convolution_range_to(input, kernel, full_output_start, output, |input_overlap, kernel_overlap| {
+            multiply_sum_tail(input_overlap, kernel_overlap, 0)
+        });
+    }
+
+    /// Writes scalar f32 additions from `start` to the end.
+    pub(super) fn add_f32_tail(left: &[f32], right: &[f32], output: &mut [f32], start: usize) {
+        for index in start..left.len() {
+            output[index] = left[index] + right[index];
+        }
+    }
+
+    /// Adds scalar f32 samples into `target` from `start` to the end.
+    pub(super) fn add_assign_f32_tail(target: &mut [f32], input: &[f32], start: usize) {
+        for index in start..target.len() {
+            target[index] += input[index];
+        }
+    }
+
+    /// Adds scalar complex add-scaled results from `start` to the end.
+    pub(super) fn add_scaled_tail(target: &mut [Complex<f32>], scale: Complex<f32>, input: &[Complex<f32>], start: usize) {
+        for index in start..target.len() {
+            target[index] += scale * input[index];
+        }
+    }
+
+    /// Writes scalar complex products from `start` to the end.
+    pub(super) fn multiply_tail(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>], start: usize) {
+        for index in start..left.len() {
+            output[index] = left[index] * right[index];
+        }
+    }
+
+    /// Writes scalar conjugate-multiply products from `start` to the end.
+    pub(super) fn conjugate_multiply_tail(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>], start: usize) {
+        for index in start..left.len() {
+            output[index] = conjugate_multiply_sample(left[index], right[index]);
+        }
+    }
+
+    /// Returns a scalar f32 squared-magnitude tail sum from `start` to the end.
+    pub(super) fn sum_squared_f32_tail(input: &[f32], start: usize) -> f32 {
+        input.iter().skip(start).map(|value| value * value).sum()
+    }
+
+    /// Writes scalar magnitudes from `start` to the end.
+    pub(super) fn calculate_magnitudes_tail(input: &[Complex<f32>], output: &mut [f32], start: usize) {
+        for index in start..input.len() {
+            output[index] = input[index].norm();
+        }
+    }
+
+    /// Returns a scalar sum of complex products from `start` to the end.
+    pub(super) fn multiply_sum_tail(left: &[Complex<f32>], right: &[Complex<f32>], start: usize) -> Complex<f32> {
+        let mut sum = Complex::new(0.0, 0.0);
+        for index in start..left.len() {
+            sum += left[index] * right[index];
+        }
+        sum
+    }
+
+    /// Returns a scalar conjugate-multiply sum from `start` to the end.
+    pub(super) fn conjugate_multiply_sum_tail(left: &[Complex<f32>], right: &[Complex<f32>], start: usize) -> Complex<f32> {
+        let mut sum = Complex::new(0.0, 0.0);
+        for index in start..left.len() {
+            sum += conjugate_multiply_sample(left[index], right[index]);
+        }
+        sum
+    }
+
+    /// Writes scalar f64 complex additions into `output`.
+    pub(super) fn iq_add_to_f64(left: &[Complex<f64>], right: &[Complex<f64>], output: &mut [Complex<f64>]) {
+        for ((left_sample, right_sample), output_sample) in left.iter().zip(right.iter()).zip(output.iter_mut()) {
+            *output_sample = *left_sample + *right_sample;
+        }
+    }
+
+    /// Adds scalar f64 complex samples into `target`.
+    pub(super) fn iq_add_in_place_f64(target: &mut [Complex<f64>], input: &[Complex<f64>]) {
+        for (target_sample, input_sample) in target.iter_mut().zip(input.iter()) {
+            *target_sample += *input_sample;
+        }
+    }
+
+    /// Scales scalar f64 complex samples in place.
+    pub(super) fn iq_scale_in_place_f64(target: &mut [Complex<f64>], scale: f64) {
+        for target_sample in target {
+            *target_sample *= scale;
+        }
+    }
+
+    /// Adds scalar f64 `scale * input` products into `target`.
+    pub(super) fn iq_add_scaled_in_place_f64(target: &mut [Complex<f64>], scale: Complex<f64>, input: &[Complex<f64>]) {
+        for (target_sample, input_sample) in target.iter_mut().zip(input.iter()) {
+            *target_sample += scale * *input_sample;
+        }
+    }
+
+    /// Writes scalar f64 complex products into `output`.
+    pub(super) fn iq_multiply_to_f64(left: &[Complex<f64>], right: &[Complex<f64>], output: &mut [Complex<f64>]) {
+        for ((left_sample, right_sample), output_sample) in left.iter().zip(right.iter()).zip(output.iter_mut()) {
+            *output_sample = *left_sample * *right_sample;
+        }
+    }
+
+    /// Writes scalar f64 conjugate-multiply products into `output`.
+    pub(super) fn iq_conjugate_multiply_to_f64(left: &[Complex<f64>], right: &[Complex<f64>], output: &mut [Complex<f64>]) {
+        for ((left_sample, right_sample), output_sample) in left.iter().zip(right.iter()).zip(output.iter_mut()) {
+            *output_sample = conjugate_multiply_sample(*left_sample, *right_sample);
+        }
+    }
+
+    /// Returns a scalar f64 sum of conjugate-multiply products.
+    pub(super) fn iq_conjugate_multiply_sum_f64(left: &[Complex<f64>], right: &[Complex<f64>]) -> Complex<f64> {
+        conjugate_multiply_sum_tail_f64(left, right, 0)
+    }
+
+    /// Returns a scalar f64 sum of squared magnitudes.
+    pub(super) fn iq_sum_squared_magnitudes_f64(input: &[Complex<f64>]) -> f64 {
+        input.iter().map(|sample| sample.norm_sqr()).sum()
+    }
+
+    /// Writes scalar f64 magnitudes into `output`.
+    pub(super) fn iq_calculate_magnitudes_to_f64(input: &[Complex<f64>], output: &mut [f64]) {
+        for (sample, output_sample) in input.iter().zip(output.iter_mut()) {
+            *output_sample = sample.norm();
+        }
+    }
+
+    /// Writes scalar f64 direct convolution outputs into `output`.
+    pub(super) fn iq_convolve_range_to_f64(
+        input: &[Complex<f64>],
+        kernel: &[Complex<f64>],
+        full_output_start: usize,
+        output: &mut [Complex<f64>],
+    ) {
+        write_convolution_range_to(input, kernel, full_output_start, output, |input_overlap, kernel_overlap| {
+            multiply_sum_tail_f64(input_overlap, kernel_overlap, 0)
+        });
+    }
+
+    /// Writes scalar f64 additions from `start` to the end.
+    pub(super) fn add_f64_tail(left: &[f64], right: &[f64], output: &mut [f64], start: usize) {
+        for index in start..left.len() {
+            output[index] = left[index] + right[index];
+        }
+    }
+
+    /// Adds scalar f64 samples into `target` from `start` to the end.
+    pub(super) fn add_assign_f64_tail(target: &mut [f64], input: &[f64], start: usize) {
+        for index in start..target.len() {
+            target[index] += input[index];
+        }
+    }
+
+    /// Adds scalar f64 complex add-scaled results from `start` to the end.
+    pub(super) fn add_scaled_tail_f64(target: &mut [Complex<f64>], scale: Complex<f64>, input: &[Complex<f64>], start: usize) {
+        for index in start..target.len() {
+            target[index] += scale * input[index];
+        }
+    }
+
+    /// Writes scalar f64 complex products from `start` to the end.
+    pub(super) fn multiply_tail_f64(left: &[Complex<f64>], right: &[Complex<f64>], output: &mut [Complex<f64>], start: usize) {
+        for index in start..left.len() {
+            output[index] = left[index] * right[index];
+        }
+    }
+
+    /// Writes scalar f64 conjugate-multiply products from `start` to the end.
+    pub(super) fn conjugate_multiply_tail_f64(left: &[Complex<f64>], right: &[Complex<f64>], output: &mut [Complex<f64>], start: usize) {
+        for index in start..left.len() {
+            output[index] = conjugate_multiply_sample(left[index], right[index]);
+        }
+    }
+
+    /// Returns a scalar f64 squared-magnitude tail sum from `start` to the end.
+    pub(super) fn sum_squared_f64_tail(input: &[f64], start: usize) -> f64 {
+        input.iter().skip(start).map(|value| value * value).sum()
+    }
+
+    /// Writes scalar f64 magnitudes from `start` to the end.
+    pub(super) fn calculate_magnitudes_tail_f64(input: &[Complex<f64>], output: &mut [f64], start: usize) {
+        for index in start..input.len() {
+            output[index] = input[index].norm();
+        }
+    }
+
+    /// Returns a scalar f64 sum of complex products from `start` to the end.
+    pub(super) fn multiply_sum_tail_f64(left: &[Complex<f64>], right: &[Complex<f64>], start: usize) -> Complex<f64> {
+        let mut sum = Complex::new(0.0, 0.0);
+        for index in start..left.len() {
+            sum += left[index] * right[index];
+        }
+        sum
+    }
+
+    /// Returns a scalar f64 conjugate-multiply sum from `start` to the end.
+    pub(super) fn conjugate_multiply_sum_tail_f64(left: &[Complex<f64>], right: &[Complex<f64>], start: usize) -> Complex<f64> {
+        let mut sum = Complex::new(0.0, 0.0);
+        for index in start..left.len() {
+            sum += conjugate_multiply_sample(left[index], right[index]);
+        }
+        sum
     }
 }
 
-// ============================================================================
-// f64 SIMD Operations (Similar to f32 but using F64Batch)
-// ============================================================================
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+mod x86 {
+    #![allow(dead_code)]
 
-impl VectorSimd<f64> {
-    /// Creates a VectorSimd with evenly spaced values (linspace)
-    pub fn linspace(start: f64, stop: f64, length: usize) -> Self {
-        if length == 0 {
-            return Self::new();
-        }
-        if length == 1 {
-            return Self::from_vec(vec![start]);
-        }
+    use super::*;
 
-        let step = (stop - start) / (length as f64 - 1.0);
-        let data: Vec<f64> = (0..length)
-            .map(|i| start + (i as f64) * step)
-            .collect();
-        Self { data }
-    }
-}
+    #[cfg(target_arch = "x86")]
+    use std::arch::x86::*;
 
-// Implement all the same operations for f64...
-// (Add, Sub, Mul, Div for vector and scalar operations)
-// I'll implement a few key ones to show the pattern:
+    #[cfg(target_arch = "x86_64")]
+    use std::arch::x86_64::*;
 
-impl Add for VectorSimd<f64> {
-    type Output = VectorSimd<f64>;
+    const SSE_F32_LANES: usize = 4;
+    const AVX2_F32_LANES: usize = 8;
+    const AVX512_F32_LANES: usize = 16;
+    const SSE_F64_LANES: usize = 2;
+    const AVX2_F64_LANES: usize = 4;
+    const AVX512_F64_LANES: usize = 8;
+    const SSE_COMPLEX_LANES: usize = 2;
+    const AVX2_COMPLEX_LANES: usize = 4;
+    const AVX512_COMPLEX_LANES: usize = 8;
+    const SSE_COMPLEX_LANES_F64: usize = 1;
+    const AVX2_COMPLEX_LANES_F64: usize = 2;
+    const AVX512_COMPLEX_LANES_F64: usize = 4;
+    const SSE_SIGN: [f32; SSE_F32_LANES] = [-1.0, 1.0, -1.0, 1.0];
+    const AVX2_SIGN: [f32; AVX2_F32_LANES] = [-1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0];
+    const AVX512_SIGN: [f32; AVX512_F32_LANES] = [-1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0];
+    const SSE_CONJUGATE_SIGN: [f32; SSE_F32_LANES] = [1.0, -1.0, 1.0, -1.0];
+    const AVX2_CONJUGATE_SIGN: [f32; AVX2_F32_LANES] = [1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0];
+    const AVX512_CONJUGATE_SIGN: [f32; AVX512_F32_LANES] =
+        [1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0];
+    const SSE_SIGN_F64: [f64; SSE_F64_LANES] = [-1.0, 1.0];
+    const AVX2_SIGN_F64: [f64; AVX2_F64_LANES] = [-1.0, 1.0, -1.0, 1.0];
+    const AVX512_SIGN_F64: [f64; AVX512_F64_LANES] = [-1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0];
+    const SSE_CONJUGATE_SIGN_F64: [f64; SSE_F64_LANES] = [1.0, -1.0];
+    const AVX2_CONJUGATE_SIGN_F64: [f64; AVX2_F64_LANES] = [1.0, -1.0, 1.0, -1.0];
+    const AVX512_CONJUGATE_SIGN_F64: [f64; AVX512_F64_LANES] = [1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0];
 
-    fn add(self, rhs: Self) -> Self::Output {
-        use simd_config::F64Batch;
-        self.process_simd_batches::<F64Batch>(
-            &rhs,
-            |a, b| SimdBatch::add(a, b),
-            |a, b| a + b,
-        )
-    }
-}
+    /// SSE2 backend marker.
+    pub(super) struct Sse2Backend;
 
-impl Add for &VectorSimd<f64> {
-    type Output = VectorSimd<f64>;
+    /// AVX2/FMA backend marker.
+    pub(super) struct Avx2Backend;
 
-    fn add(self, rhs: Self) -> Self::Output {
-        use simd_config::F64Batch;
-        self.process_simd_batches::<F64Batch>(
-            rhs,
-            |a, b| SimdBatch::add(a, b),
-            |a, b| a + b,
-        )
-    }
-}
+    /// AVX-512F backend marker.
+    pub(super) struct Avx512Backend;
 
-impl Mul for VectorSimd<f64> {
-    type Output = VectorSimd<f64>;
-
-    fn mul(self, rhs: Self) -> Self::Output {
-        use simd_config::F64Batch;
-        self.process_simd_batches::<F64Batch>(
-            &rhs,
-            |a, b| SimdBatch::mul(a, b),
-            |a, b| a * b,
-        )
-    }
-}
-
-impl Mul for &VectorSimd<f64> {
-    type Output = VectorSimd<f64>;
-
-    fn mul(self, rhs: Self) -> Self::Output {
-        use simd_config::F64Batch;
-        self.process_simd_batches::<F64Batch>(
-            rhs,
-            |a, b| SimdBatch::mul(a, b),
-            |a, b| a * b,
-        )
-    }
-}
-
-impl DivAssign<f64> for VectorSimd<f64> {
-    fn div_assign(&mut self, rhs: f64) {
-        use simd_config::F64Batch;
-        self.process_simd_batches_scalar_inplace::<F64Batch>(
-            rhs,
-            |a, b| SimdBatch::div(a, b),
-            |a, b| a / b,
-        );
-    }
-}
-
-// ============================================================================
-// Complex Number Optimized Operations
-// ============================================================================
-
-// Complex number operations for Complex<f32>
-//
-// Performance Analysis:
-// - Explicit SIMD with `wide` crate doesn't provide significant benefits for complex operations
-// - The `wide` crate lacks shuffle/swizzle instructions needed for efficient complex math
-// - With only 2 complex numbers per f32x4 register, extraction overhead is too high
-// - LLVM's auto-vectorization is excellent for simple loops with complex numbers
-//
-// Optimization Strategy:
-// - Use simple loops that LLVM can auto-vectorize
-// - Apply memory allocation optimization: Vec::with_capacity + unsafe set_len
-// - This avoids initialization overhead while maintaining good performance
-//
-// Benchmark Results (Complex<f32> multiplication, 100k elements):
-// - Optimized (allocation fix):  206 µs
-// - Auto-vectorized baseline:     83 µs  (0.40x - compiler is excellent!)
-// - Non-vectorized baseline:     276 µs  (1.34x - we beat non-vectorized code!)
-//
-// Key Insight: The real performance win comes from avoiding unnecessary zero-initialization,
-// not from explicit SIMD. LLVM auto-vectorization handles the rest.
-
-impl VectorSimd<Complex<f32>> {
-    /// Optimized complex addition (leverages LLVM auto-vectorization + allocation optimization)
-    fn add_optimized(&self, other: &VectorSimd<Complex<f32>>) -> VectorSimd<Complex<f32>> {
-        assert_eq!(self.len(), other.len());
-
-        // Allocate without initialization for better performance
-        let mut result = Vec::with_capacity(self.len());
-        unsafe {
-            result.set_len(self.len());
+    impl IqBackend for Sse2Backend {
+        fn iq_add_to(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]) {
+            unsafe { sse2_iq_add_to(left, right, output) };
         }
 
-        // Simple loop - LLVM will auto-vectorize this
-        for i in 0..self.len() {
-            result[i] = self.data[i] + other.data[i];
+        fn iq_add_in_place(target: &mut [Complex<f32>], input: &[Complex<f32>]) {
+            unsafe { sse2_iq_add_in_place(target, input) };
         }
 
-        VectorSimd { data: result }
-    }
-
-    /// Optimized complex multiplication (uses auto-vectorization)
-    fn mul_optimized(&self, other: &VectorSimd<Complex<f32>>) -> VectorSimd<Complex<f32>> {
-        assert_eq!(self.len(), other.len());
-
-        // Allocate without initialization
-        let mut result = Vec::with_capacity(self.len());
-        unsafe {
-            result.set_len(self.len());
+        fn iq_scale_in_place(target: &mut [Complex<f32>], scale: f32) {
+            scalar::iq_scale_in_place(target, scale);
         }
 
-        // Simple loop - LLVM will auto-vectorize complex multiplication
-        for i in 0..self.len() {
-            result[i] = self.data[i] * other.data[i];
+        fn iq_add_scaled_in_place(target: &mut [Complex<f32>], scale: Complex<f32>, input: &[Complex<f32>]) {
+            unsafe { sse2_iq_add_scaled_in_place(target, scale, input) };
         }
 
-        VectorSimd { data: result }
-    }
-
-    /// Optimized complex subtraction (uses auto-vectorization)
-    fn sub_optimized(&self, other: &VectorSimd<Complex<f32>>) -> VectorSimd<Complex<f32>> {
-        assert_eq!(self.len(), other.len());
-
-        let mut result = Vec::with_capacity(self.len());
-        unsafe {
-            result.set_len(self.len());
+        fn iq_multiply_to(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]) {
+            unsafe { sse2_iq_multiply_to(left, right, output) };
         }
 
-        for i in 0..self.len() {
-            result[i] = self.data[i] - other.data[i];
+        fn iq_conjugate_multiply_to(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]) {
+            unsafe { sse2_iq_conjugate_multiply_to(left, right, output) };
         }
 
-        VectorSimd { data: result }
-    }
-
-    /// Optimized complex division (uses auto-vectorization)
-    fn div_optimized(&self, other: &VectorSimd<Complex<f32>>) -> VectorSimd<Complex<f32>> {
-        assert_eq!(self.len(), other.len());
-
-        let mut result = Vec::with_capacity(self.len());
-        unsafe {
-            result.set_len(self.len());
+        fn iq_conjugate_multiply_sum(left: &[Complex<f32>], right: &[Complex<f32>]) -> Complex<f32> {
+            unsafe { sse2_iq_conjugate_multiply_sum(left, right) }
         }
 
-        for i in 0..self.len() {
-            result[i] = self.data[i] / other.data[i];
+        fn iq_sum_squared_magnitudes(input: &[Complex<f32>]) -> f32 {
+            unsafe { sse2_iq_sum_squared_magnitudes(input) }
         }
 
-        VectorSimd { data: result }
-    }
-}
-
-// Operator trait implementations using SIMD
-
-impl Add for VectorSimd<Complex<f32>> {
-    type Output = VectorSimd<Complex<f32>>;
-
-    fn add(self, rhs: Self) -> Self::Output {
-        self.add_optimized(&rhs)
-    }
-}
-
-impl Add for &VectorSimd<Complex<f32>> {
-    type Output = VectorSimd<Complex<f32>>;
-
-    fn add(self, rhs: Self) -> Self::Output {
-        self.add_optimized(rhs)
-    }
-}
-
-impl Sub for VectorSimd<Complex<f32>> {
-    type Output = VectorSimd<Complex<f32>>;
-
-    fn sub(self, rhs: Self) -> Self::Output {
-        self.sub_optimized(&rhs)
-    }
-}
-
-impl Sub for &VectorSimd<Complex<f32>> {
-    type Output = VectorSimd<Complex<f32>>;
-
-    fn sub(self, rhs: Self) -> Self::Output {
-        self.sub_optimized(rhs)
-    }
-}
-
-impl Mul for VectorSimd<Complex<f32>> {
-    type Output = VectorSimd<Complex<f32>>;
-
-    fn mul(self, rhs: Self) -> Self::Output {
-        self.mul_optimized(&rhs)
-    }
-}
-
-impl Mul for &VectorSimd<Complex<f32>> {
-    type Output = VectorSimd<Complex<f32>>;
-
-    fn mul(self, rhs: Self) -> Self::Output {
-        self.mul_optimized(rhs)
-    }
-}
-
-impl Div for VectorSimd<Complex<f32>> {
-    type Output = VectorSimd<Complex<f32>>;
-
-    fn div(self, rhs: Self) -> Self::Output {
-        self.div_optimized(&rhs)
-    }
-}
-
-impl Div for &VectorSimd<Complex<f32>> {
-    type Output = VectorSimd<Complex<f32>>;
-
-    fn div(self, rhs: Self) -> Self::Output {
-        self.div_optimized(rhs)
-    }
-}
-
-impl VectorSimd<Complex<f32>> {
-    /// SIMD-optimized convolution for complex-valued signals
-    pub fn convolve(&self, kernel: &VectorSimd<Complex<f32>>) -> VectorSimd<Complex<f32>> {
-        if kernel.size() > self.size() {
-            return VectorSimd::new();
+        fn iq_calculate_magnitudes_to(input: &[Complex<f32>], output: &mut [f32]) {
+            unsafe { sse2_iq_calculate_magnitudes_to(input, output) };
         }
 
-        use simd_config::F32Batch;
-        const LANES: usize = 2; // 2 complex numbers per f32x4
+        fn iq_convolve_range_to(input: &[Complex<f32>], kernel: &[Complex<f32>], full_output_start: usize, output: &mut [Complex<f32>]) {
+            unsafe { sse2_iq_convolve_range_to(input, kernel, full_output_start, output) };
+        }
+    }
 
-        let output_size = self.size() - kernel.size() + 1;
-        let mut result = vec![Complex::new(0.0, 0.0); output_size];
-
-        let simd_chunks = output_size / LANES;
-
-        // Process LANES output samples at a time
-        for chunk_idx in 0..simd_chunks {
-            let base_idx = chunk_idx * LANES;
-            let mut accum = F32Batch::from([0.0, 0.0, 0.0, 0.0]);
-
-            // For each kernel tap
-            for k in 0..kernel.size() {
-                // Load 2 complex signal values - SAFETY: Complex<f32> has repr(C) layout
-                let sig_floats: &[f32] = unsafe {
-                    std::slice::from_raw_parts(
-                        self.data[base_idx + k..].as_ptr() as *const f32,
-                        4
-                    )
-                };
-                let sig = F32Batch::from(&sig_floats[0..4]);
-
-                // Broadcast kernel value to both lanes
-                let kern = Complex::new(kernel.data[k].re, kernel.data[k].im);
-                let kern_batch = F32Batch::from([kern.re, kern.im, kern.re, kern.im]);
-
-                // Complex multiply: sig * kern
-                let sig_arr = sig.to_array();
-                let sig_re_re = F32Batch::from([sig_arr[0], sig_arr[0], sig_arr[2], sig_arr[2]]);
-                let sig_im_im = F32Batch::from([sig_arr[1], sig_arr[1], sig_arr[3], sig_arr[3]]);
-                let kern_arr = kern_batch.to_array();
-                let kern_re_im = kern_batch;
-                let kern_im_re = F32Batch::from([kern_arr[1], kern_arr[0], kern_arr[3], kern_arr[2]]);
-
-                let prod1 = sig_re_re * kern_re_im;
-                let prod2 = sig_im_im * kern_im_re;
-                let signs_neg = F32Batch::from([-1.0, 1.0, -1.0, 1.0]);
-                let prod = prod1 + (prod2 * signs_neg);
-
-                accum = accum + prod;
-            }
-
-            // Store result
-            let accum_arr = accum.to_array();
-            result[base_idx] = Complex::new(accum_arr[0], accum_arr[1]);
-            result[base_idx + 1] = Complex::new(accum_arr[2], accum_arr[3]);
+    impl IqBackend for Avx2Backend {
+        fn iq_add_to(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]) {
+            unsafe { avx2_iq_add_to(left, right, output) };
         }
 
-        // Handle remaining elements
-        for i in (simd_chunks * LANES)..output_size {
-            let mut sum = Complex::new(0.0, 0.0);
-            for j in 0..kernel.size() {
-                sum += self.data[i + j] * kernel.data[j];
-            }
-            result[i] = sum;
+        fn iq_add_in_place(target: &mut [Complex<f32>], input: &[Complex<f32>]) {
+            unsafe { avx2_iq_add_in_place(target, input) };
         }
 
-        VectorSimd { data: result }
+        fn iq_scale_in_place(target: &mut [Complex<f32>], scale: f32) {
+            scalar::iq_scale_in_place(target, scale);
+        }
+
+        fn iq_add_scaled_in_place(target: &mut [Complex<f32>], scale: Complex<f32>, input: &[Complex<f32>]) {
+            unsafe { avx2_iq_add_scaled_in_place(target, scale, input) };
+        }
+
+        fn iq_multiply_to(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]) {
+            unsafe { avx2_iq_multiply_to(left, right, output) };
+        }
+
+        fn iq_conjugate_multiply_to(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]) {
+            unsafe { avx2_iq_conjugate_multiply_to(left, right, output) };
+        }
+
+        fn iq_conjugate_multiply_sum(left: &[Complex<f32>], right: &[Complex<f32>]) -> Complex<f32> {
+            unsafe { avx2_iq_conjugate_multiply_sum(left, right) }
+        }
+
+        fn iq_sum_squared_magnitudes(input: &[Complex<f32>]) -> f32 {
+            unsafe { avx2_iq_sum_squared_magnitudes(input) }
+        }
+
+        fn iq_calculate_magnitudes_to(input: &[Complex<f32>], output: &mut [f32]) {
+            unsafe { avx2_iq_calculate_magnitudes_to(input, output) };
+        }
+
+        fn iq_convolve_range_to(input: &[Complex<f32>], kernel: &[Complex<f32>], full_output_start: usize, output: &mut [Complex<f32>]) {
+            unsafe { avx2_iq_convolve_range_to(input, kernel, full_output_start, output) };
+        }
+    }
+
+    impl IqBackend for Avx512Backend {
+        fn iq_add_to(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]) {
+            unsafe { avx512_iq_add_to(left, right, output) };
+        }
+
+        fn iq_add_in_place(target: &mut [Complex<f32>], input: &[Complex<f32>]) {
+            unsafe { avx512_iq_add_in_place(target, input) };
+        }
+
+        fn iq_scale_in_place(target: &mut [Complex<f32>], scale: f32) {
+            scalar::iq_scale_in_place(target, scale);
+        }
+
+        fn iq_add_scaled_in_place(target: &mut [Complex<f32>], scale: Complex<f32>, input: &[Complex<f32>]) {
+            unsafe { avx512_iq_add_scaled_in_place(target, scale, input) };
+        }
+
+        fn iq_multiply_to(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]) {
+            unsafe { avx512_iq_multiply_to(left, right, output) };
+        }
+
+        fn iq_conjugate_multiply_to(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]) {
+            unsafe { avx512_iq_conjugate_multiply_to(left, right, output) };
+        }
+
+        fn iq_conjugate_multiply_sum(left: &[Complex<f32>], right: &[Complex<f32>]) -> Complex<f32> {
+            unsafe { avx512_iq_conjugate_multiply_sum(left, right) }
+        }
+
+        fn iq_sum_squared_magnitudes(input: &[Complex<f32>]) -> f32 {
+            unsafe { avx512_iq_sum_squared_magnitudes(input) }
+        }
+
+        fn iq_calculate_magnitudes_to(input: &[Complex<f32>], output: &mut [f32]) {
+            unsafe { avx512_iq_calculate_magnitudes_to(input, output) };
+        }
+
+        fn iq_convolve_range_to(input: &[Complex<f32>], kernel: &[Complex<f32>], full_output_start: usize, output: &mut [Complex<f32>]) {
+            unsafe { avx512_iq_convolve_range_to(input, kernel, full_output_start, output) };
+        }
+    }
+
+    impl IqBackendF64 for Sse2Backend {
+        fn iq_add_to(left: &[Complex<f64>], right: &[Complex<f64>], output: &mut [Complex<f64>]) {
+            unsafe { sse2_iq_add_to_f64(left, right, output) };
+        }
+
+        fn iq_add_in_place(target: &mut [Complex<f64>], input: &[Complex<f64>]) {
+            unsafe { sse2_iq_add_in_place_f64(target, input) };
+        }
+
+        fn iq_scale_in_place(target: &mut [Complex<f64>], scale: f64) {
+            scalar::iq_scale_in_place_f64(target, scale);
+        }
+
+        fn iq_add_scaled_in_place(target: &mut [Complex<f64>], scale: Complex<f64>, input: &[Complex<f64>]) {
+            unsafe { sse2_iq_add_scaled_in_place_f64(target, scale, input) };
+        }
+
+        fn iq_multiply_to(left: &[Complex<f64>], right: &[Complex<f64>], output: &mut [Complex<f64>]) {
+            unsafe { sse2_iq_multiply_to_f64(left, right, output) };
+        }
+
+        fn iq_conjugate_multiply_to(left: &[Complex<f64>], right: &[Complex<f64>], output: &mut [Complex<f64>]) {
+            unsafe { sse2_iq_conjugate_multiply_to_f64(left, right, output) };
+        }
+
+        fn iq_conjugate_multiply_sum(left: &[Complex<f64>], right: &[Complex<f64>]) -> Complex<f64> {
+            unsafe { sse2_iq_conjugate_multiply_sum_f64(left, right) }
+        }
+
+        fn iq_sum_squared_magnitudes(input: &[Complex<f64>]) -> f64 {
+            unsafe { sse2_iq_sum_squared_magnitudes_f64(input) }
+        }
+
+        fn iq_calculate_magnitudes_to(input: &[Complex<f64>], output: &mut [f64]) {
+            unsafe { sse2_iq_calculate_magnitudes_to_f64(input, output) };
+        }
+
+        fn iq_convolve_range_to(input: &[Complex<f64>], kernel: &[Complex<f64>], full_output_start: usize, output: &mut [Complex<f64>]) {
+            unsafe { sse2_iq_convolve_range_to_f64(input, kernel, full_output_start, output) };
+        }
+    }
+
+    impl IqBackendF64 for Avx2Backend {
+        fn iq_add_to(left: &[Complex<f64>], right: &[Complex<f64>], output: &mut [Complex<f64>]) {
+            unsafe { avx2_iq_add_to_f64(left, right, output) };
+        }
+
+        fn iq_add_in_place(target: &mut [Complex<f64>], input: &[Complex<f64>]) {
+            unsafe { avx2_iq_add_in_place_f64(target, input) };
+        }
+
+        fn iq_scale_in_place(target: &mut [Complex<f64>], scale: f64) {
+            scalar::iq_scale_in_place_f64(target, scale);
+        }
+
+        fn iq_add_scaled_in_place(target: &mut [Complex<f64>], scale: Complex<f64>, input: &[Complex<f64>]) {
+            unsafe { avx2_iq_add_scaled_in_place_f64(target, scale, input) };
+        }
+
+        fn iq_multiply_to(left: &[Complex<f64>], right: &[Complex<f64>], output: &mut [Complex<f64>]) {
+            unsafe { avx2_iq_multiply_to_f64(left, right, output) };
+        }
+
+        fn iq_conjugate_multiply_to(left: &[Complex<f64>], right: &[Complex<f64>], output: &mut [Complex<f64>]) {
+            unsafe { avx2_iq_conjugate_multiply_to_f64(left, right, output) };
+        }
+
+        fn iq_conjugate_multiply_sum(left: &[Complex<f64>], right: &[Complex<f64>]) -> Complex<f64> {
+            unsafe { avx2_iq_conjugate_multiply_sum_f64(left, right) }
+        }
+
+        fn iq_sum_squared_magnitudes(input: &[Complex<f64>]) -> f64 {
+            unsafe { avx2_iq_sum_squared_magnitudes_f64(input) }
+        }
+
+        fn iq_calculate_magnitudes_to(input: &[Complex<f64>], output: &mut [f64]) {
+            unsafe { avx2_iq_calculate_magnitudes_to_f64(input, output) };
+        }
+
+        fn iq_convolve_range_to(input: &[Complex<f64>], kernel: &[Complex<f64>], full_output_start: usize, output: &mut [Complex<f64>]) {
+            unsafe { avx2_iq_convolve_range_to_f64(input, kernel, full_output_start, output) };
+        }
+    }
+
+    impl IqBackendF64 for Avx512Backend {
+        fn iq_add_to(left: &[Complex<f64>], right: &[Complex<f64>], output: &mut [Complex<f64>]) {
+            unsafe { avx512_iq_add_to_f64(left, right, output) };
+        }
+
+        fn iq_add_in_place(target: &mut [Complex<f64>], input: &[Complex<f64>]) {
+            unsafe { avx512_iq_add_in_place_f64(target, input) };
+        }
+
+        fn iq_scale_in_place(target: &mut [Complex<f64>], scale: f64) {
+            scalar::iq_scale_in_place_f64(target, scale);
+        }
+
+        fn iq_add_scaled_in_place(target: &mut [Complex<f64>], scale: Complex<f64>, input: &[Complex<f64>]) {
+            unsafe { avx512_iq_add_scaled_in_place_f64(target, scale, input) };
+        }
+
+        fn iq_multiply_to(left: &[Complex<f64>], right: &[Complex<f64>], output: &mut [Complex<f64>]) {
+            unsafe { avx512_iq_multiply_to_f64(left, right, output) };
+        }
+
+        fn iq_conjugate_multiply_to(left: &[Complex<f64>], right: &[Complex<f64>], output: &mut [Complex<f64>]) {
+            unsafe { avx512_iq_conjugate_multiply_to_f64(left, right, output) };
+        }
+
+        fn iq_conjugate_multiply_sum(left: &[Complex<f64>], right: &[Complex<f64>]) -> Complex<f64> {
+            unsafe { avx512_iq_conjugate_multiply_sum_f64(left, right) }
+        }
+
+        fn iq_sum_squared_magnitudes(input: &[Complex<f64>]) -> f64 {
+            unsafe { avx512_iq_sum_squared_magnitudes_f64(input) }
+        }
+
+        fn iq_calculate_magnitudes_to(input: &[Complex<f64>], output: &mut [f64]) {
+            unsafe { avx512_iq_calculate_magnitudes_to_f64(input, output) };
+        }
+
+        fn iq_convolve_range_to(input: &[Complex<f64>], kernel: &[Complex<f64>], full_output_start: usize, output: &mut [Complex<f64>]) {
+            unsafe { avx512_iq_convolve_range_to_f64(input, kernel, full_output_start, output) };
+        }
+    }
+
+    /// Writes SSE2 f32 additions into `output`.
+    #[target_feature(enable = "sse2")]
+    unsafe fn sse2_iq_add_to(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]) {
+        let end = unsafe { add_f32_vectors(as_f32_slice(left), as_f32_slice(right), as_f32_slice_mut(output)) };
+        scalar::add_f32_tail(as_f32_slice(left), as_f32_slice(right), as_f32_slice_mut(output), end);
+    }
+
+    /// Adds SSE2 f32 samples into `target`.
+    #[target_feature(enable = "sse2")]
+    unsafe fn sse2_iq_add_in_place(target: &mut [Complex<f32>], input: &[Complex<f32>]) {
+        let end = unsafe { add_assign_f32_vectors(as_f32_slice_mut(target), as_f32_slice(input)) };
+        scalar::add_assign_f32_tail(as_f32_slice_mut(target), as_f32_slice(input), end);
+    }
+
+    /// Adds SSE2 complex add-scaled results into `target`.
+    #[target_feature(enable = "sse2")]
+    unsafe fn sse2_iq_add_scaled_in_place(target: &mut [Complex<f32>], scale: Complex<f32>, input: &[Complex<f32>]) {
+        let end = unsafe { sse2_add_scaled_vectors(target, scale, input) };
+        scalar::add_scaled_tail(target, scale, input, end);
+    }
+
+    /// Writes SSE2 complex products into `output`.
+    #[target_feature(enable = "sse2")]
+    unsafe fn sse2_iq_multiply_to(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]) {
+        let end = unsafe { sse2_multiply_vectors(left, right, output) };
+        scalar::multiply_tail(left, right, output, end);
+    }
+
+    /// Writes SSE2 conjugate-multiply products into `output`.
+    #[target_feature(enable = "sse2")]
+    unsafe fn sse2_iq_conjugate_multiply_to(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]) {
+        let end = unsafe { sse2_conjugate_multiply_vectors(left, right, output) };
+        scalar::conjugate_multiply_tail(left, right, output, end);
+    }
+
+    /// Returns an SSE2 sum of conjugate-multiply products.
+    #[target_feature(enable = "sse2")]
+    unsafe fn sse2_iq_conjugate_multiply_sum(left: &[Complex<f32>], right: &[Complex<f32>]) -> Complex<f32> {
+        let (end, sum) = unsafe { sse2_complex_conjugate_multiply_sum_vectors(left, right) };
+        sum + scalar::conjugate_multiply_sum_tail(left, right, end)
+    }
+
+    /// Returns an SSE2 sum of squared magnitudes.
+    #[target_feature(enable = "sse2")]
+    unsafe fn sse2_iq_sum_squared_magnitudes(input: &[Complex<f32>]) -> f32 {
+        let (end, sum) = unsafe { sum_squared_f32_vectors(as_f32_slice(input)) };
+        sum + scalar::sum_squared_f32_tail(as_f32_slice(input), end)
+    }
+
+    /// Writes SSE2 magnitudes into `output`.
+    #[target_feature(enable = "sse2")]
+    unsafe fn sse2_iq_calculate_magnitudes_to(input: &[Complex<f32>], output: &mut [f32]) {
+        let end = unsafe { sse2_magnitude_vectors(input, output) };
+        scalar::calculate_magnitudes_tail(input, output, end);
+    }
+
+    /// Writes SSE2 direct convolution outputs into `output`.
+    #[target_feature(enable = "sse2")]
+    unsafe fn sse2_iq_convolve_range_to(input: &[Complex<f32>], kernel: &[Complex<f32>], full_output_start: usize, output: &mut [Complex<f32>]) {
+        write_convolution_range_to(input, kernel, full_output_start, output, |input_overlap, kernel_overlap| unsafe {
+            sse2_complex_multiply_sum(input_overlap, kernel_overlap)
+        });
+    }
+
+    /// Writes AVX2 f32 additions into `output`.
+    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "fma")]
+    unsafe fn avx2_iq_add_to(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]) {
+        let end = unsafe { avx2_add_f32_vectors(as_f32_slice(left), as_f32_slice(right), as_f32_slice_mut(output)) };
+        scalar::add_f32_tail(as_f32_slice(left), as_f32_slice(right), as_f32_slice_mut(output), end);
+    }
+
+    /// Adds AVX2 f32 samples into `target`.
+    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "fma")]
+    unsafe fn avx2_iq_add_in_place(target: &mut [Complex<f32>], input: &[Complex<f32>]) {
+        let end = unsafe { avx2_add_assign_f32_vectors(as_f32_slice_mut(target), as_f32_slice(input)) };
+        scalar::add_assign_f32_tail(as_f32_slice_mut(target), as_f32_slice(input), end);
+    }
+
+    /// Adds AVX2 complex add-scaled results into `target`.
+    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "fma")]
+    unsafe fn avx2_iq_add_scaled_in_place(target: &mut [Complex<f32>], scale: Complex<f32>, input: &[Complex<f32>]) {
+        let end = unsafe { avx2_add_scaled_vectors(target, scale, input) };
+        scalar::add_scaled_tail(target, scale, input, end);
+    }
+
+    /// Writes AVX2 complex products into `output`.
+    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "fma")]
+    unsafe fn avx2_iq_multiply_to(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]) {
+        let end = unsafe { avx2_multiply_vectors(left, right, output) };
+        scalar::multiply_tail(left, right, output, end);
+    }
+
+    /// Writes AVX2 conjugate-multiply products into `output`.
+    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "fma")]
+    unsafe fn avx2_iq_conjugate_multiply_to(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]) {
+        let end = unsafe { avx2_conjugate_multiply_vectors(left, right, output) };
+        scalar::conjugate_multiply_tail(left, right, output, end);
+    }
+
+    /// Returns an AVX2 sum of conjugate-multiply products.
+    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "fma")]
+    unsafe fn avx2_iq_conjugate_multiply_sum(left: &[Complex<f32>], right: &[Complex<f32>]) -> Complex<f32> {
+        let (end, sum) = unsafe { avx2_complex_conjugate_multiply_sum_vectors(left, right) };
+        sum + scalar::conjugate_multiply_sum_tail(left, right, end)
+    }
+
+    /// Returns an AVX2 sum of squared magnitudes.
+    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "fma")]
+    unsafe fn avx2_iq_sum_squared_magnitudes(input: &[Complex<f32>]) -> f32 {
+        let (end, sum) = unsafe { avx2_sum_squared_f32_vectors(as_f32_slice(input)) };
+        sum + scalar::sum_squared_f32_tail(as_f32_slice(input), end)
+    }
+
+    /// Writes AVX2 magnitudes into `output`.
+    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "fma")]
+    unsafe fn avx2_iq_calculate_magnitudes_to(input: &[Complex<f32>], output: &mut [f32]) {
+        let end = unsafe { avx2_magnitude_vectors(input, output) };
+        scalar::calculate_magnitudes_tail(input, output, end);
+    }
+
+    /// Writes AVX2 direct convolution outputs into `output`.
+    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "fma")]
+    unsafe fn avx2_iq_convolve_range_to(input: &[Complex<f32>], kernel: &[Complex<f32>], full_output_start: usize, output: &mut [Complex<f32>]) {
+        write_convolution_range_to(input, kernel, full_output_start, output, |input_overlap, kernel_overlap| unsafe {
+            avx2_complex_multiply_sum(input_overlap, kernel_overlap)
+        });
+    }
+
+    /// Writes AVX-512 f32 additions into `output`.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_iq_add_to(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]) {
+        let end = unsafe { avx512_add_f32_vectors(as_f32_slice(left), as_f32_slice(right), as_f32_slice_mut(output)) };
+        scalar::add_f32_tail(as_f32_slice(left), as_f32_slice(right), as_f32_slice_mut(output), end);
+    }
+
+    /// Adds AVX-512 f32 samples into `target`.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_iq_add_in_place(target: &mut [Complex<f32>], input: &[Complex<f32>]) {
+        let end = unsafe { avx512_add_assign_f32_vectors(as_f32_slice_mut(target), as_f32_slice(input)) };
+        scalar::add_assign_f32_tail(as_f32_slice_mut(target), as_f32_slice(input), end);
+    }
+
+    /// Adds AVX-512 complex add-scaled results into `target`.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_iq_add_scaled_in_place(target: &mut [Complex<f32>], scale: Complex<f32>, input: &[Complex<f32>]) {
+        let end = unsafe { avx512_add_scaled_vectors(target, scale, input) };
+        scalar::add_scaled_tail(target, scale, input, end);
+    }
+
+    /// Writes AVX-512 complex products into `output`.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_iq_multiply_to(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]) {
+        let end = unsafe { avx512_multiply_vectors(left, right, output) };
+        scalar::multiply_tail(left, right, output, end);
+    }
+
+    /// Writes AVX-512 conjugate-multiply products into `output`.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_iq_conjugate_multiply_to(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]) {
+        let end = unsafe { avx512_conjugate_multiply_vectors(left, right, output) };
+        scalar::conjugate_multiply_tail(left, right, output, end);
+    }
+
+    /// Returns an AVX-512 sum of conjugate-multiply products.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_iq_conjugate_multiply_sum(left: &[Complex<f32>], right: &[Complex<f32>]) -> Complex<f32> {
+        let (end, sum) = unsafe { avx512_complex_conjugate_multiply_sum_vectors(left, right) };
+        sum + scalar::conjugate_multiply_sum_tail(left, right, end)
+    }
+
+    /// Returns an AVX-512 sum of squared magnitudes.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_iq_sum_squared_magnitudes(input: &[Complex<f32>]) -> f32 {
+        let (end, sum) = unsafe { avx512_sum_squared_f32_vectors(as_f32_slice(input)) };
+        sum + scalar::sum_squared_f32_tail(as_f32_slice(input), end)
+    }
+
+    /// Writes AVX-512 magnitudes into `output`.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_iq_calculate_magnitudes_to(input: &[Complex<f32>], output: &mut [f32]) {
+        let end = unsafe { avx512_magnitude_vectors(input, output) };
+        scalar::calculate_magnitudes_tail(input, output, end);
+    }
+
+    /// Writes AVX-512 direct convolution outputs into `output`.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_iq_convolve_range_to(
+        input: &[Complex<f32>],
+        kernel: &[Complex<f32>],
+        full_output_start: usize,
+        output: &mut [Complex<f32>],
+    ) {
+        write_convolution_range_to(input, kernel, full_output_start, output, |input_overlap, kernel_overlap| unsafe {
+            avx512_complex_multiply_sum(input_overlap, kernel_overlap)
+        });
+    }
+
+    /// Writes SSE2 f64 additions into `output`.
+    #[target_feature(enable = "sse2")]
+    unsafe fn sse2_iq_add_to_f64(left: &[Complex<f64>], right: &[Complex<f64>], output: &mut [Complex<f64>]) {
+        let end = unsafe { add_f64_vectors(as_f64_slice(left), as_f64_slice(right), as_f64_slice_mut(output)) };
+        scalar::add_f64_tail(as_f64_slice(left), as_f64_slice(right), as_f64_slice_mut(output), end);
+    }
+
+    /// Adds SSE2 f64 samples into `target`.
+    #[target_feature(enable = "sse2")]
+    unsafe fn sse2_iq_add_in_place_f64(target: &mut [Complex<f64>], input: &[Complex<f64>]) {
+        let end = unsafe { add_assign_f64_vectors(as_f64_slice_mut(target), as_f64_slice(input)) };
+        scalar::add_assign_f64_tail(as_f64_slice_mut(target), as_f64_slice(input), end);
+    }
+
+    /// Adds SSE2 f64 complex add-scaled results into `target`.
+    #[target_feature(enable = "sse2")]
+    unsafe fn sse2_iq_add_scaled_in_place_f64(target: &mut [Complex<f64>], scale: Complex<f64>, input: &[Complex<f64>]) {
+        let end = unsafe { sse2_add_scaled_vectors_f64(target, scale, input) };
+        scalar::add_scaled_tail_f64(target, scale, input, end);
+    }
+
+    /// Writes SSE2 f64 complex products into `output`.
+    #[target_feature(enable = "sse2")]
+    unsafe fn sse2_iq_multiply_to_f64(left: &[Complex<f64>], right: &[Complex<f64>], output: &mut [Complex<f64>]) {
+        let end = unsafe { sse2_multiply_vectors_f64(left, right, output) };
+        scalar::multiply_tail_f64(left, right, output, end);
+    }
+
+    /// Writes SSE2 f64 conjugate-multiply products into `output`.
+    #[target_feature(enable = "sse2")]
+    unsafe fn sse2_iq_conjugate_multiply_to_f64(left: &[Complex<f64>], right: &[Complex<f64>], output: &mut [Complex<f64>]) {
+        let end = unsafe { sse2_conjugate_multiply_vectors_f64(left, right, output) };
+        scalar::conjugate_multiply_tail_f64(left, right, output, end);
+    }
+
+    /// Returns an SSE2 f64 sum of conjugate-multiply products.
+    #[target_feature(enable = "sse2")]
+    unsafe fn sse2_iq_conjugate_multiply_sum_f64(left: &[Complex<f64>], right: &[Complex<f64>]) -> Complex<f64> {
+        let (end, sum) = unsafe { sse2_complex_conjugate_multiply_sum_vectors_f64(left, right) };
+        sum + scalar::conjugate_multiply_sum_tail_f64(left, right, end)
+    }
+
+    /// Returns an SSE2 f64 sum of squared magnitudes.
+    #[target_feature(enable = "sse2")]
+    unsafe fn sse2_iq_sum_squared_magnitudes_f64(input: &[Complex<f64>]) -> f64 {
+        let (end, sum) = unsafe { sum_squared_f64_vectors(as_f64_slice(input)) };
+        sum + scalar::sum_squared_f64_tail(as_f64_slice(input), end)
+    }
+
+    /// Writes SSE2 f64 magnitudes into `output`.
+    #[target_feature(enable = "sse2")]
+    unsafe fn sse2_iq_calculate_magnitudes_to_f64(input: &[Complex<f64>], output: &mut [f64]) {
+        let end = unsafe { sse2_magnitude_vectors_f64(input, output) };
+        scalar::calculate_magnitudes_tail_f64(input, output, end);
+    }
+
+    /// Writes SSE2 f64 direct convolution outputs into `output`.
+    #[target_feature(enable = "sse2")]
+    unsafe fn sse2_iq_convolve_range_to_f64(
+        input: &[Complex<f64>],
+        kernel: &[Complex<f64>],
+        full_output_start: usize,
+        output: &mut [Complex<f64>],
+    ) {
+        write_convolution_range_to(input, kernel, full_output_start, output, |input_overlap, kernel_overlap| unsafe {
+            sse2_complex_multiply_sum_f64(input_overlap, kernel_overlap)
+        });
+    }
+
+    /// Writes AVX2 f64 additions into `output`.
+    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "fma")]
+    unsafe fn avx2_iq_add_to_f64(left: &[Complex<f64>], right: &[Complex<f64>], output: &mut [Complex<f64>]) {
+        let end = unsafe { avx2_add_f64_vectors(as_f64_slice(left), as_f64_slice(right), as_f64_slice_mut(output)) };
+        scalar::add_f64_tail(as_f64_slice(left), as_f64_slice(right), as_f64_slice_mut(output), end);
+    }
+
+    /// Adds AVX2 f64 samples into `target`.
+    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "fma")]
+    unsafe fn avx2_iq_add_in_place_f64(target: &mut [Complex<f64>], input: &[Complex<f64>]) {
+        let end = unsafe { avx2_add_assign_f64_vectors(as_f64_slice_mut(target), as_f64_slice(input)) };
+        scalar::add_assign_f64_tail(as_f64_slice_mut(target), as_f64_slice(input), end);
+    }
+
+    /// Adds AVX2 f64 complex add-scaled results into `target`.
+    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "fma")]
+    unsafe fn avx2_iq_add_scaled_in_place_f64(target: &mut [Complex<f64>], scale: Complex<f64>, input: &[Complex<f64>]) {
+        let end = unsafe { avx2_add_scaled_vectors_f64(target, scale, input) };
+        scalar::add_scaled_tail_f64(target, scale, input, end);
+    }
+
+    /// Writes AVX2 f64 complex products into `output`.
+    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "fma")]
+    unsafe fn avx2_iq_multiply_to_f64(left: &[Complex<f64>], right: &[Complex<f64>], output: &mut [Complex<f64>]) {
+        let end = unsafe { avx2_multiply_vectors_f64(left, right, output) };
+        scalar::multiply_tail_f64(left, right, output, end);
+    }
+
+    /// Writes AVX2 f64 conjugate-multiply products into `output`.
+    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "fma")]
+    unsafe fn avx2_iq_conjugate_multiply_to_f64(left: &[Complex<f64>], right: &[Complex<f64>], output: &mut [Complex<f64>]) {
+        let end = unsafe { avx2_conjugate_multiply_vectors_f64(left, right, output) };
+        scalar::conjugate_multiply_tail_f64(left, right, output, end);
+    }
+
+    /// Returns an AVX2 f64 sum of conjugate-multiply products.
+    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "fma")]
+    unsafe fn avx2_iq_conjugate_multiply_sum_f64(left: &[Complex<f64>], right: &[Complex<f64>]) -> Complex<f64> {
+        let (end, sum) = unsafe { avx2_complex_conjugate_multiply_sum_vectors_f64(left, right) };
+        sum + scalar::conjugate_multiply_sum_tail_f64(left, right, end)
+    }
+
+    /// Returns an AVX2 f64 sum of squared magnitudes.
+    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "fma")]
+    unsafe fn avx2_iq_sum_squared_magnitudes_f64(input: &[Complex<f64>]) -> f64 {
+        let (end, sum) = unsafe { avx2_sum_squared_f64_vectors(as_f64_slice(input)) };
+        sum + scalar::sum_squared_f64_tail(as_f64_slice(input), end)
+    }
+
+    /// Writes AVX2 f64 magnitudes into `output`.
+    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "fma")]
+    unsafe fn avx2_iq_calculate_magnitudes_to_f64(input: &[Complex<f64>], output: &mut [f64]) {
+        let end = unsafe { avx2_magnitude_vectors_f64(input, output) };
+        scalar::calculate_magnitudes_tail_f64(input, output, end);
+    }
+
+    /// Writes AVX2 f64 direct convolution outputs into `output`.
+    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "fma")]
+    unsafe fn avx2_iq_convolve_range_to_f64(
+        input: &[Complex<f64>],
+        kernel: &[Complex<f64>],
+        full_output_start: usize,
+        output: &mut [Complex<f64>],
+    ) {
+        write_convolution_range_to(input, kernel, full_output_start, output, |input_overlap, kernel_overlap| unsafe {
+            avx2_complex_multiply_sum_f64(input_overlap, kernel_overlap)
+        });
+    }
+
+    /// Writes AVX-512 f64 additions into `output`.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_iq_add_to_f64(left: &[Complex<f64>], right: &[Complex<f64>], output: &mut [Complex<f64>]) {
+        let end = unsafe { avx512_add_f64_vectors(as_f64_slice(left), as_f64_slice(right), as_f64_slice_mut(output)) };
+        scalar::add_f64_tail(as_f64_slice(left), as_f64_slice(right), as_f64_slice_mut(output), end);
+    }
+
+    /// Adds AVX-512 f64 samples into `target`.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_iq_add_in_place_f64(target: &mut [Complex<f64>], input: &[Complex<f64>]) {
+        let end = unsafe { avx512_add_assign_f64_vectors(as_f64_slice_mut(target), as_f64_slice(input)) };
+        scalar::add_assign_f64_tail(as_f64_slice_mut(target), as_f64_slice(input), end);
+    }
+
+    /// Adds AVX-512 f64 complex add-scaled results into `target`.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_iq_add_scaled_in_place_f64(target: &mut [Complex<f64>], scale: Complex<f64>, input: &[Complex<f64>]) {
+        let end = unsafe { avx512_add_scaled_vectors_f64(target, scale, input) };
+        scalar::add_scaled_tail_f64(target, scale, input, end);
+    }
+
+    /// Writes AVX-512 f64 complex products into `output`.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_iq_multiply_to_f64(left: &[Complex<f64>], right: &[Complex<f64>], output: &mut [Complex<f64>]) {
+        let end = unsafe { avx512_multiply_vectors_f64(left, right, output) };
+        scalar::multiply_tail_f64(left, right, output, end);
+    }
+
+    /// Writes AVX-512 f64 conjugate-multiply products into `output`.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_iq_conjugate_multiply_to_f64(left: &[Complex<f64>], right: &[Complex<f64>], output: &mut [Complex<f64>]) {
+        let end = unsafe { avx512_conjugate_multiply_vectors_f64(left, right, output) };
+        scalar::conjugate_multiply_tail_f64(left, right, output, end);
+    }
+
+    /// Returns an AVX-512 f64 sum of conjugate-multiply products.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_iq_conjugate_multiply_sum_f64(left: &[Complex<f64>], right: &[Complex<f64>]) -> Complex<f64> {
+        let (end, sum) = unsafe { avx512_complex_conjugate_multiply_sum_vectors_f64(left, right) };
+        sum + scalar::conjugate_multiply_sum_tail_f64(left, right, end)
+    }
+
+    /// Returns an AVX-512 f64 sum of squared magnitudes.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_iq_sum_squared_magnitudes_f64(input: &[Complex<f64>]) -> f64 {
+        let (end, sum) = unsafe { avx512_sum_squared_f64_vectors(as_f64_slice(input)) };
+        sum + scalar::sum_squared_f64_tail(as_f64_slice(input), end)
+    }
+
+    /// Writes AVX-512 f64 magnitudes into `output`.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_iq_calculate_magnitudes_to_f64(input: &[Complex<f64>], output: &mut [f64]) {
+        let end = unsafe { avx512_magnitude_vectors_f64(input, output) };
+        scalar::calculate_magnitudes_tail_f64(input, output, end);
+    }
+
+    /// Writes AVX-512 f64 direct convolution outputs into `output`.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_iq_convolve_range_to_f64(
+        input: &[Complex<f64>],
+        kernel: &[Complex<f64>],
+        full_output_start: usize,
+        output: &mut [Complex<f64>],
+    ) {
+        write_convolution_range_to(input, kernel, full_output_start, output, |input_overlap, kernel_overlap| unsafe {
+            avx512_complex_multiply_sum_f64(input_overlap, kernel_overlap)
+        });
+    }
+
+    /// Writes SSE2 f32 additions and returns the processed prefix length.
+    #[target_feature(enable = "sse2")]
+    unsafe fn add_f32_vectors(left: &[f32], right: &[f32], output: &mut [f32]) -> usize {
+        let end = vectorized_end(left.len(), SSE_F32_LANES);
+        let mut index = 0;
+        while index < end {
+            let sum = unsafe { _mm_add_ps(load_sse(left, index), load_sse(right, index)) };
+            unsafe { _mm_storeu_ps(output.as_mut_ptr().add(index), sum) };
+            index += SSE_F32_LANES;
+        }
+        end
+    }
+
+    /// Adds SSE2 f32 samples and returns the processed prefix length.
+    #[target_feature(enable = "sse2")]
+    unsafe fn add_assign_f32_vectors(target: &mut [f32], input: &[f32]) -> usize {
+        let end = vectorized_end(target.len(), SSE_F32_LANES);
+        let mut index = 0;
+        while index < end {
+            let sum = unsafe { _mm_add_ps(load_sse(target, index), load_sse(input, index)) };
+            unsafe { _mm_storeu_ps(target.as_mut_ptr().add(index), sum) };
+            index += SSE_F32_LANES;
+        }
+        end
+    }
+
+    /// Adds SSE2 complex add-scaled values and returns processed complex samples.
+    #[target_feature(enable = "sse2")]
+    unsafe fn sse2_add_scaled_vectors(target: &mut [Complex<f32>], scale: Complex<f32>, input: &[Complex<f32>]) -> usize {
+        let end = vectorized_end(input.len(), SSE_COMPLEX_LANES);
+        let scale_re = _mm_set1_ps(scale.re);
+        let scale_im = unsafe { _mm_mul_ps(_mm_set1_ps(scale.im), load_sse_sign()) };
+        let mut index = 0;
+        while index < end {
+            unsafe { store_sse_add_scaled(target, input, index, scale_re, scale_im) };
+            index += SSE_COMPLEX_LANES;
+        }
+        end
+    }
+
+    /// Writes SSE2 complex products and returns processed complex samples.
+    #[target_feature(enable = "sse2")]
+    unsafe fn sse2_multiply_vectors(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]) -> usize {
+        let end = vectorized_end(left.len(), SSE_COMPLEX_LANES);
+        let sign = unsafe { load_sse_sign() };
+        let mut index = 0;
+        while index < end {
+            unsafe { store_sse_multiply(left, right, output, index, sign) };
+            index += SSE_COMPLEX_LANES;
+        }
+        end
+    }
+
+    /// Writes SSE2 conjugate-multiply products and returns processed complex samples.
+    #[target_feature(enable = "sse2")]
+    unsafe fn sse2_conjugate_multiply_vectors(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]) -> usize {
+        let end = vectorized_end(left.len(), SSE_COMPLEX_LANES);
+        let sign = unsafe { load_sse_sign() };
+        let conjugate_sign = unsafe { load_sse_conjugate_sign() };
+        let mut index = 0;
+        while index < end {
+            unsafe { store_sse_conjugate_multiply(left, right, output, index, sign, conjugate_sign) };
+            index += SSE_COMPLEX_LANES;
+        }
+        end
+    }
+
+    /// Returns the SSE2 f32 square sum and processed prefix length.
+    #[target_feature(enable = "sse2")]
+    unsafe fn sum_squared_f32_vectors(input: &[f32]) -> (usize, f32) {
+        let end = vectorized_end(input.len(), SSE_F32_LANES);
+        let mut accum = _mm_setzero_ps();
+        let mut index = 0;
+        while index < end {
+            let values = unsafe { load_sse(input, index) };
+            accum = _mm_add_ps(accum, _mm_mul_ps(values, values));
+            index += SSE_F32_LANES;
+        }
+        (end, unsafe { horizontal_sum_sse(accum) })
+    }
+
+    /// Writes SSE2 magnitudes and returns processed complex samples.
+    #[target_feature(enable = "sse2")]
+    unsafe fn sse2_magnitude_vectors(input: &[Complex<f32>], output: &mut [f32]) -> usize {
+        let end = vectorized_end(input.len(), SSE_COMPLEX_LANES);
+        let input_f32 = as_f32_slice(input);
+        let mut index = 0;
+        while index < end {
+            let magnitudes = unsafe { sse2_magnitudes(input_f32, index) };
+            output[index..index + SSE_COMPLEX_LANES].copy_from_slice(&magnitudes);
+            index += SSE_COMPLEX_LANES;
+        }
+        end
+    }
+
+    /// Returns the SSE2 sum of pairwise complex products.
+    #[target_feature(enable = "sse2")]
+    unsafe fn sse2_complex_multiply_sum(left: &[Complex<f32>], right: &[Complex<f32>]) -> Complex<f32> {
+        let (end, sum) = unsafe { sse2_complex_multiply_sum_vectors(left, right) };
+        sum + scalar::multiply_sum_tail(left, right, end)
+    }
+
+    /// Returns the SSE2 vector sum and processed complex samples.
+    #[target_feature(enable = "sse2")]
+    unsafe fn sse2_complex_multiply_sum_vectors(left: &[Complex<f32>], right: &[Complex<f32>]) -> (usize, Complex<f32>) {
+        let end = vectorized_end(left.len(), SSE_COMPLEX_LANES);
+        let sign = unsafe { load_sse_sign() };
+        let mut accum = _mm_setzero_ps();
+        let mut index = 0;
+        while index < end {
+            let left_vector = unsafe { load_sse(as_f32_slice(left), index * 2) };
+            let right_vector = unsafe { load_sse(as_f32_slice(right), index * 2) };
+            accum = _mm_add_ps(accum, unsafe { complex_multiply_sse(left_vector, right_vector, sign) });
+            index += SSE_COMPLEX_LANES;
+        }
+        (end, unsafe { horizontal_complex_sum_sse(accum) })
+    }
+
+    /// Returns the SSE2 conjugate-multiply vector sum and processed samples.
+    #[target_feature(enable = "sse2")]
+    unsafe fn sse2_complex_conjugate_multiply_sum_vectors(left: &[Complex<f32>], right: &[Complex<f32>]) -> (usize, Complex<f32>) {
+        let end = vectorized_end(left.len(), SSE_COMPLEX_LANES);
+        let sign = unsafe { load_sse_sign() };
+        let conjugate_sign = unsafe { load_sse_conjugate_sign() };
+        let mut accum = _mm_setzero_ps();
+        let mut index = 0;
+        while index < end {
+            let left_vector = unsafe { load_sse(as_f32_slice(left), index * 2) };
+            let right_vector = unsafe { load_sse(as_f32_slice(right), index * 2) };
+            accum = _mm_add_ps(accum, unsafe {
+                complex_conjugate_multiply_sse(left_vector, right_vector, sign, conjugate_sign)
+            });
+            index += SSE_COMPLEX_LANES;
+        }
+        (end, unsafe { horizontal_complex_sum_sse(accum) })
+    }
+
+    /// Writes AVX2 f32 additions and returns the processed prefix length.
+    #[target_feature(enable = "avx2")]
+    unsafe fn avx2_add_f32_vectors(left: &[f32], right: &[f32], output: &mut [f32]) -> usize {
+        let end = vectorized_end(left.len(), AVX2_F32_LANES);
+        let mut index = 0;
+        while index < end {
+            let sum = unsafe { _mm256_add_ps(load_avx2(left, index), load_avx2(right, index)) };
+            unsafe { _mm256_storeu_ps(output.as_mut_ptr().add(index), sum) };
+            index += AVX2_F32_LANES;
+        }
+        end
+    }
+
+    /// Adds AVX2 f32 samples and returns the processed prefix length.
+    #[target_feature(enable = "avx2")]
+    unsafe fn avx2_add_assign_f32_vectors(target: &mut [f32], input: &[f32]) -> usize {
+        let end = vectorized_end(target.len(), AVX2_F32_LANES);
+        let mut index = 0;
+        while index < end {
+            let sum = unsafe { _mm256_add_ps(load_avx2(target, index), load_avx2(input, index)) };
+            unsafe { _mm256_storeu_ps(target.as_mut_ptr().add(index), sum) };
+            index += AVX2_F32_LANES;
+        }
+        end
+    }
+
+    /// Adds AVX2 complex add-scaled values and returns processed complex samples.
+    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "fma")]
+    unsafe fn avx2_add_scaled_vectors(target: &mut [Complex<f32>], scale: Complex<f32>, input: &[Complex<f32>]) -> usize {
+        let end = vectorized_end(input.len(), AVX2_COMPLEX_LANES);
+        let scale_re = _mm256_set1_ps(scale.re);
+        let scale_im = unsafe { _mm256_mul_ps(_mm256_set1_ps(scale.im), load_avx2_sign()) };
+        let mut index = 0;
+        while index < end {
+            unsafe { store_avx2_add_scaled(target, input, index, scale_re, scale_im) };
+            index += AVX2_COMPLEX_LANES;
+        }
+        end
+    }
+
+    /// Writes AVX2 complex products and returns processed complex samples.
+    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "fma")]
+    unsafe fn avx2_multiply_vectors(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]) -> usize {
+        let end = vectorized_end(left.len(), AVX2_COMPLEX_LANES);
+        let sign = unsafe { load_avx2_sign() };
+        let mut index = 0;
+        while index < end {
+            unsafe { store_avx2_multiply(left, right, output, index, sign) };
+            index += AVX2_COMPLEX_LANES;
+        }
+        end
+    }
+
+    /// Writes AVX2 conjugate-multiply products and returns processed complex samples.
+    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "fma")]
+    unsafe fn avx2_conjugate_multiply_vectors(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]) -> usize {
+        let end = vectorized_end(left.len(), AVX2_COMPLEX_LANES);
+        let sign = unsafe { load_avx2_sign() };
+        let conjugate_sign = unsafe { load_avx2_conjugate_sign() };
+        let mut index = 0;
+        while index < end {
+            unsafe { store_avx2_conjugate_multiply(left, right, output, index, sign, conjugate_sign) };
+            index += AVX2_COMPLEX_LANES;
+        }
+        end
+    }
+
+    /// Returns the AVX2 f32 square sum and processed prefix length.
+    #[target_feature(enable = "avx2")]
+    unsafe fn avx2_sum_squared_f32_vectors(input: &[f32]) -> (usize, f32) {
+        let end = vectorized_end(input.len(), AVX2_F32_LANES);
+        let mut accum = _mm256_setzero_ps();
+        let mut index = 0;
+        while index < end {
+            let values = unsafe { load_avx2(input, index) };
+            accum = _mm256_add_ps(accum, _mm256_mul_ps(values, values));
+            index += AVX2_F32_LANES;
+        }
+        (end, unsafe { horizontal_sum_avx2(accum) })
+    }
+
+    /// Writes AVX2 magnitudes and returns processed complex samples.
+    #[target_feature(enable = "avx2")]
+    unsafe fn avx2_magnitude_vectors(input: &[Complex<f32>], output: &mut [f32]) -> usize {
+        let end = vectorized_end(input.len(), AVX2_COMPLEX_LANES);
+        let input_f32 = as_f32_slice(input);
+        let mut index = 0;
+        while index < end {
+            let magnitudes = unsafe { avx2_magnitudes(input_f32, index) };
+            output[index..index + AVX2_COMPLEX_LANES].copy_from_slice(&magnitudes);
+            index += AVX2_COMPLEX_LANES;
+        }
+        end
+    }
+
+    /// Returns the AVX2 sum of pairwise complex products.
+    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "fma")]
+    unsafe fn avx2_complex_multiply_sum(left: &[Complex<f32>], right: &[Complex<f32>]) -> Complex<f32> {
+        let (end, sum) = unsafe { avx2_complex_multiply_sum_vectors(left, right) };
+        sum + scalar::multiply_sum_tail(left, right, end)
+    }
+
+    /// Returns the AVX2 vector sum and processed complex samples.
+    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "fma")]
+    unsafe fn avx2_complex_multiply_sum_vectors(left: &[Complex<f32>], right: &[Complex<f32>]) -> (usize, Complex<f32>) {
+        let end = vectorized_end(left.len(), AVX2_COMPLEX_LANES);
+        let sign = unsafe { load_avx2_sign() };
+        let mut accum = _mm256_setzero_ps();
+        let mut index = 0;
+        while index < end {
+            let left_vector = unsafe { load_avx2(as_f32_slice(left), index * 2) };
+            let right_vector = unsafe { load_avx2(as_f32_slice(right), index * 2) };
+            accum = _mm256_add_ps(accum, complex_multiply_avx2(left_vector, right_vector, sign));
+            index += AVX2_COMPLEX_LANES;
+        }
+        (end, unsafe { horizontal_complex_sum_avx2(accum) })
+    }
+
+    /// Returns the AVX2 conjugate-multiply vector sum and processed samples.
+    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "fma")]
+    unsafe fn avx2_complex_conjugate_multiply_sum_vectors(left: &[Complex<f32>], right: &[Complex<f32>]) -> (usize, Complex<f32>) {
+        let end = vectorized_end(left.len(), AVX2_COMPLEX_LANES);
+        let sign = unsafe { load_avx2_sign() };
+        let conjugate_sign = unsafe { load_avx2_conjugate_sign() };
+        let mut accum = _mm256_setzero_ps();
+        let mut index = 0;
+        while index < end {
+            let left_vector = unsafe { load_avx2(as_f32_slice(left), index * 2) };
+            let right_vector = unsafe { load_avx2(as_f32_slice(right), index * 2) };
+            accum = _mm256_add_ps(accum, complex_conjugate_multiply_avx2(left_vector, right_vector, sign, conjugate_sign));
+            index += AVX2_COMPLEX_LANES;
+        }
+        (end, unsafe { horizontal_complex_sum_avx2(accum) })
+    }
+
+    /// Writes AVX-512 f32 additions and returns the processed prefix length.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_add_f32_vectors(left: &[f32], right: &[f32], output: &mut [f32]) -> usize {
+        let end = vectorized_end(left.len(), AVX512_F32_LANES);
+        let mut index = 0;
+        while index < end {
+            let sum = unsafe { _mm512_add_ps(load_avx512(left, index), load_avx512(right, index)) };
+            unsafe { _mm512_storeu_ps(output.as_mut_ptr().add(index), sum) };
+            index += AVX512_F32_LANES;
+        }
+        end
+    }
+
+    /// Adds AVX-512 f32 samples and returns the processed prefix length.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_add_assign_f32_vectors(target: &mut [f32], input: &[f32]) -> usize {
+        let end = vectorized_end(target.len(), AVX512_F32_LANES);
+        let mut index = 0;
+        while index < end {
+            let sum = unsafe { _mm512_add_ps(load_avx512(target, index), load_avx512(input, index)) };
+            unsafe { _mm512_storeu_ps(target.as_mut_ptr().add(index), sum) };
+            index += AVX512_F32_LANES;
+        }
+        end
+    }
+
+    /// Adds AVX-512 complex add-scaled values and returns processed complex samples.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_add_scaled_vectors(target: &mut [Complex<f32>], scale: Complex<f32>, input: &[Complex<f32>]) -> usize {
+        let end = vectorized_end(input.len(), AVX512_COMPLEX_LANES);
+        let scale_re = _mm512_set1_ps(scale.re);
+        let scale_im = unsafe { _mm512_mul_ps(_mm512_set1_ps(scale.im), load_avx512_sign()) };
+        let mut index = 0;
+        while index < end {
+            unsafe { store_avx512_add_scaled(target, input, index, scale_re, scale_im) };
+            index += AVX512_COMPLEX_LANES;
+        }
+        end
+    }
+
+    /// Writes AVX-512 complex products and returns processed complex samples.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_multiply_vectors(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]) -> usize {
+        let end = vectorized_end(left.len(), AVX512_COMPLEX_LANES);
+        let sign = unsafe { load_avx512_sign() };
+        let mut index = 0;
+        while index < end {
+            unsafe { store_avx512_multiply(left, right, output, index, sign) };
+            index += AVX512_COMPLEX_LANES;
+        }
+        end
+    }
+
+    /// Writes AVX-512 conjugate-multiply products and returns processed samples.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_conjugate_multiply_vectors(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>]) -> usize {
+        let end = vectorized_end(left.len(), AVX512_COMPLEX_LANES);
+        let sign = unsafe { load_avx512_sign() };
+        let conjugate_sign = unsafe { load_avx512_conjugate_sign() };
+        let mut index = 0;
+        while index < end {
+            unsafe { store_avx512_conjugate_multiply(left, right, output, index, sign, conjugate_sign) };
+            index += AVX512_COMPLEX_LANES;
+        }
+        end
+    }
+
+    /// Returns the AVX-512 f32 square sum and processed prefix length.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_sum_squared_f32_vectors(input: &[f32]) -> (usize, f32) {
+        let end = vectorized_end(input.len(), AVX512_F32_LANES);
+        let mut accum = _mm512_setzero_ps();
+        let mut index = 0;
+        while index < end {
+            let values = unsafe { load_avx512(input, index) };
+            accum = _mm512_add_ps(accum, _mm512_mul_ps(values, values));
+            index += AVX512_F32_LANES;
+        }
+        (end, unsafe { horizontal_sum_avx512(accum) })
+    }
+
+    /// Writes AVX-512 magnitudes and returns processed complex samples.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_magnitude_vectors(input: &[Complex<f32>], output: &mut [f32]) -> usize {
+        let end = vectorized_end(input.len(), AVX512_COMPLEX_LANES);
+        let input_f32 = as_f32_slice(input);
+        let mut index = 0;
+        while index < end {
+            let magnitudes = unsafe { avx512_magnitudes(input_f32, index) };
+            output[index..index + AVX512_COMPLEX_LANES].copy_from_slice(&magnitudes);
+            index += AVX512_COMPLEX_LANES;
+        }
+        end
+    }
+
+    /// Returns the AVX-512 sum of pairwise complex products.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_complex_multiply_sum(left: &[Complex<f32>], right: &[Complex<f32>]) -> Complex<f32> {
+        let (end, sum) = unsafe { avx512_complex_multiply_sum_vectors(left, right) };
+        sum + scalar::multiply_sum_tail(left, right, end)
+    }
+
+    /// Returns the AVX-512 vector sum and processed complex samples.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_complex_multiply_sum_vectors(left: &[Complex<f32>], right: &[Complex<f32>]) -> (usize, Complex<f32>) {
+        let end = vectorized_end(left.len(), AVX512_COMPLEX_LANES);
+        let sign = unsafe { load_avx512_sign() };
+        let mut accum = _mm512_setzero_ps();
+        let mut index = 0;
+        while index < end {
+            let left_vector = unsafe { load_avx512(as_f32_slice(left), index * 2) };
+            let right_vector = unsafe { load_avx512(as_f32_slice(right), index * 2) };
+            accum = _mm512_add_ps(accum, complex_multiply_avx512(left_vector, right_vector, sign));
+            index += AVX512_COMPLEX_LANES;
+        }
+        (end, unsafe { horizontal_complex_sum_avx512(accum) })
+    }
+
+    /// Returns the AVX-512 conjugate-multiply vector sum and processed samples.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_complex_conjugate_multiply_sum_vectors(left: &[Complex<f32>], right: &[Complex<f32>]) -> (usize, Complex<f32>) {
+        let end = vectorized_end(left.len(), AVX512_COMPLEX_LANES);
+        let sign = unsafe { load_avx512_sign() };
+        let conjugate_sign = unsafe { load_avx512_conjugate_sign() };
+        let mut accum = _mm512_setzero_ps();
+        let mut index = 0;
+        while index < end {
+            let left_vector = unsafe { load_avx512(as_f32_slice(left), index * 2) };
+            let right_vector = unsafe { load_avx512(as_f32_slice(right), index * 2) };
+            accum = _mm512_add_ps(accum, complex_conjugate_multiply_avx512(left_vector, right_vector, sign, conjugate_sign));
+            index += AVX512_COMPLEX_LANES;
+        }
+        (end, unsafe { horizontal_complex_sum_avx512(accum) })
+    }
+
+    /// Loads four f32 values from an unaligned slice offset.
+    #[target_feature(enable = "sse2")]
+    unsafe fn load_sse(input: &[f32], index: usize) -> __m128 {
+        unsafe { _mm_loadu_ps(input.as_ptr().add(index)) }
+    }
+
+    /// Loads the SSE complex sign pattern.
+    #[target_feature(enable = "sse2")]
+    unsafe fn load_sse_sign() -> __m128 {
+        unsafe { _mm_loadu_ps(SSE_SIGN.as_ptr()) }
+    }
+
+    /// Loads the SSE conjugate sign pattern.
+    #[target_feature(enable = "sse2")]
+    unsafe fn load_sse_conjugate_sign() -> __m128 {
+        unsafe { _mm_loadu_ps(SSE_CONJUGATE_SIGN.as_ptr()) }
+    }
+
+    /// Stores one SSE add-scaled vector into `target`.
+    #[target_feature(enable = "sse2")]
+    unsafe fn store_sse_add_scaled(target: &mut [Complex<f32>], input: &[Complex<f32>], index: usize, scale_re: __m128, scale_im: __m128) {
+        let input_vector = unsafe { load_sse(as_f32_slice(input), index * 2) };
+        let product = unsafe { complex_scale_sse(input_vector, scale_re, scale_im) };
+        let target_vector = unsafe { load_sse(as_f32_slice(target), index * 2) };
+        let output = _mm_add_ps(target_vector, product);
+        unsafe { _mm_storeu_ps(as_f32_slice_mut(target).as_mut_ptr().add(index * 2), output) };
+    }
+
+    /// Stores one SSE complex multiplication vector into `output`.
+    #[target_feature(enable = "sse2")]
+    unsafe fn store_sse_multiply(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>], index: usize, sign: __m128) {
+        let left_vector = unsafe { load_sse(as_f32_slice(left), index * 2) };
+        let right_vector = unsafe { load_sse(as_f32_slice(right), index * 2) };
+        let product = unsafe { complex_multiply_sse(left_vector, right_vector, sign) };
+        unsafe { _mm_storeu_ps(as_f32_slice_mut(output).as_mut_ptr().add(index * 2), product) };
+    }
+
+    /// Stores one SSE conjugate-multiply vector into `output`.
+    #[target_feature(enable = "sse2")]
+    unsafe fn store_sse_conjugate_multiply(
+        left: &[Complex<f32>],
+        right: &[Complex<f32>],
+        output: &mut [Complex<f32>],
+        index: usize,
+        sign: __m128,
+        conjugate_sign: __m128,
+    ) {
+        let left_vector = unsafe { load_sse(as_f32_slice(left), index * 2) };
+        let right_vector = unsafe { load_sse(as_f32_slice(right), index * 2) };
+        let product = unsafe { complex_conjugate_multiply_sse(left_vector, right_vector, sign, conjugate_sign) };
+        unsafe { _mm_storeu_ps(as_f32_slice_mut(output).as_mut_ptr().add(index * 2), product) };
+    }
+
+    /// Multiplies packed SSE complex values by a broadcast complex scalar.
+    #[target_feature(enable = "sse2")]
+    unsafe fn complex_scale_sse(input: __m128, scale_re: __m128, scale_im: __m128) -> __m128 {
+        let swapped = _mm_shuffle_ps(input, input, 0xb1);
+        let real_product = _mm_mul_ps(input, scale_re);
+        let imag_product = _mm_mul_ps(swapped, scale_im);
+        _mm_add_ps(real_product, imag_product)
+    }
+
+    /// Multiplies packed SSE complex values pairwise.
+    #[target_feature(enable = "sse2")]
+    unsafe fn complex_multiply_sse(left: __m128, right: __m128, sign: __m128) -> __m128 {
+        let right_re = _mm_shuffle_ps(right, right, 0xa0);
+        let right_im = _mm_mul_ps(_mm_shuffle_ps(right, right, 0xf5), sign);
+        unsafe { complex_scale_sse(left, right_re, right_im) }
+    }
+
+    /// Multiplies packed conjugated SSE complex values pairwise.
+    #[target_feature(enable = "sse2")]
+    unsafe fn complex_conjugate_multiply_sse(left: __m128, right: __m128, sign: __m128, conjugate_sign: __m128) -> __m128 {
+        let conjugated_left = _mm_mul_ps(left, conjugate_sign);
+        unsafe { complex_multiply_sse(conjugated_left, right, sign) }
+    }
+
+    /// Horizontally sums an SSE f32 vector.
+    #[target_feature(enable = "sse2")]
+    unsafe fn horizontal_sum_sse(input: __m128) -> f32 {
+        let mut values = [0.0; SSE_F32_LANES];
+        unsafe { _mm_storeu_ps(values.as_mut_ptr(), input) };
+        values.iter().sum()
+    }
+
+    /// Horizontally sums packed SSE complex lanes.
+    #[target_feature(enable = "sse2")]
+    unsafe fn horizontal_complex_sum_sse(input: __m128) -> Complex<f32> {
+        let mut values = [0.0; SSE_F32_LANES];
+        unsafe { _mm_storeu_ps(values.as_mut_ptr(), input) };
+        sum_interleaved_complex_lanes(&values)
+    }
+
+    /// Calculates two SSE complex magnitudes.
+    #[target_feature(enable = "sse2")]
+    unsafe fn sse2_magnitudes(input_f32: &[f32], index: usize) -> [f32; SSE_COMPLEX_LANES] {
+        let values = unsafe { load_sse(input_f32, index * 2) };
+        let squares = _mm_mul_ps(values, values);
+        let paired = _mm_add_ps(squares, _mm_shuffle_ps(squares, squares, 0xb1));
+        let roots = _mm_sqrt_ps(paired);
+        let mut lanes = [0.0; SSE_F32_LANES];
+        unsafe { _mm_storeu_ps(lanes.as_mut_ptr(), roots) };
+        [lanes[0], lanes[2]]
+    }
+
+    /// Loads eight f32 values from an unaligned slice offset.
+    #[target_feature(enable = "avx2")]
+    unsafe fn load_avx2(input: &[f32], index: usize) -> __m256 {
+        unsafe { _mm256_loadu_ps(input.as_ptr().add(index)) }
+    }
+
+    /// Loads the AVX2 complex sign pattern.
+    #[target_feature(enable = "avx2")]
+    unsafe fn load_avx2_sign() -> __m256 {
+        unsafe { _mm256_loadu_ps(AVX2_SIGN.as_ptr()) }
+    }
+
+    /// Loads the AVX2 conjugate sign pattern.
+    #[target_feature(enable = "avx2")]
+    unsafe fn load_avx2_conjugate_sign() -> __m256 {
+        unsafe { _mm256_loadu_ps(AVX2_CONJUGATE_SIGN.as_ptr()) }
+    }
+
+    /// Stores one AVX2 add-scaled vector into `target`.
+    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "fma")]
+    unsafe fn store_avx2_add_scaled(target: &mut [Complex<f32>], input: &[Complex<f32>], index: usize, scale_re: __m256, scale_im: __m256) {
+        let input_vector = unsafe { load_avx2(as_f32_slice(input), index * 2) };
+        let product = complex_scale_avx2(input_vector, scale_re, scale_im);
+        let target_vector = unsafe { load_avx2(as_f32_slice(target), index * 2) };
+        let output = _mm256_add_ps(target_vector, product);
+        unsafe { _mm256_storeu_ps(as_f32_slice_mut(target).as_mut_ptr().add(index * 2), output) };
+    }
+
+    /// Stores one AVX2 complex multiplication vector into `output`.
+    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "fma")]
+    unsafe fn store_avx2_multiply(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>], index: usize, sign: __m256) {
+        let left_vector = unsafe { load_avx2(as_f32_slice(left), index * 2) };
+        let right_vector = unsafe { load_avx2(as_f32_slice(right), index * 2) };
+        let product = complex_multiply_avx2(left_vector, right_vector, sign);
+        unsafe { _mm256_storeu_ps(as_f32_slice_mut(output).as_mut_ptr().add(index * 2), product) };
+    }
+
+    /// Stores one AVX2 conjugate-multiply vector into `output`.
+    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "fma")]
+    unsafe fn store_avx2_conjugate_multiply(
+        left: &[Complex<f32>],
+        right: &[Complex<f32>],
+        output: &mut [Complex<f32>],
+        index: usize,
+        sign: __m256,
+        conjugate_sign: __m256,
+    ) {
+        let left_vector = unsafe { load_avx2(as_f32_slice(left), index * 2) };
+        let right_vector = unsafe { load_avx2(as_f32_slice(right), index * 2) };
+        let product = complex_conjugate_multiply_avx2(left_vector, right_vector, sign, conjugate_sign);
+        unsafe { _mm256_storeu_ps(as_f32_slice_mut(output).as_mut_ptr().add(index * 2), product) };
+    }
+
+    /// Multiplies packed AVX2 complex values by a broadcast complex scalar.
+    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "fma")]
+    fn complex_scale_avx2(input: __m256, scale_re: __m256, scale_im: __m256) -> __m256 {
+        let swapped = _mm256_permute_ps(input, 0xb1);
+        let real_product = _mm256_mul_ps(input, scale_re);
+        _mm256_fmadd_ps(swapped, scale_im, real_product)
+    }
+
+    /// Multiplies packed AVX2 complex values pairwise.
+    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "fma")]
+    fn complex_multiply_avx2(left: __m256, right: __m256, sign: __m256) -> __m256 {
+        let right_re = _mm256_permute_ps(right, 0xa0);
+        let right_im = _mm256_mul_ps(_mm256_permute_ps(right, 0xf5), sign);
+        complex_scale_avx2(left, right_re, right_im)
+    }
+
+    /// Multiplies packed conjugated AVX2 complex values pairwise.
+    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "fma")]
+    fn complex_conjugate_multiply_avx2(left: __m256, right: __m256, sign: __m256, conjugate_sign: __m256) -> __m256 {
+        let conjugated_left = _mm256_mul_ps(left, conjugate_sign);
+        complex_multiply_avx2(conjugated_left, right, sign)
+    }
+
+    /// Horizontally sums an AVX2 f32 vector.
+    #[target_feature(enable = "avx2")]
+    unsafe fn horizontal_sum_avx2(input: __m256) -> f32 {
+        let mut values = [0.0; AVX2_F32_LANES];
+        unsafe { _mm256_storeu_ps(values.as_mut_ptr(), input) };
+        values.iter().sum()
+    }
+
+    /// Horizontally sums packed AVX2 complex lanes.
+    #[target_feature(enable = "avx2")]
+    unsafe fn horizontal_complex_sum_avx2(input: __m256) -> Complex<f32> {
+        let mut values = [0.0; AVX2_F32_LANES];
+        unsafe { _mm256_storeu_ps(values.as_mut_ptr(), input) };
+        sum_interleaved_complex_lanes(&values)
+    }
+
+    /// Calculates four AVX2 complex magnitudes.
+    #[target_feature(enable = "avx2")]
+    unsafe fn avx2_magnitudes(input_f32: &[f32], index: usize) -> [f32; AVX2_COMPLEX_LANES] {
+        let values = unsafe { load_avx2(input_f32, index * 2) };
+        let squares = _mm256_mul_ps(values, values);
+        let paired = _mm256_add_ps(squares, _mm256_permute_ps(squares, 0xb1));
+        let roots = _mm256_sqrt_ps(paired);
+        let mut lanes = [0.0; AVX2_F32_LANES];
+        unsafe { _mm256_storeu_ps(lanes.as_mut_ptr(), roots) };
+        [lanes[0], lanes[2], lanes[4], lanes[6]]
+    }
+
+    /// Loads sixteen f32 values from an unaligned slice offset.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn load_avx512(input: &[f32], index: usize) -> __m512 {
+        unsafe { _mm512_loadu_ps(input.as_ptr().add(index)) }
+    }
+
+    /// Loads the AVX-512 complex sign pattern.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn load_avx512_sign() -> __m512 {
+        unsafe { _mm512_loadu_ps(AVX512_SIGN.as_ptr()) }
+    }
+
+    /// Loads the AVX-512 conjugate sign pattern.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn load_avx512_conjugate_sign() -> __m512 {
+        unsafe { _mm512_loadu_ps(AVX512_CONJUGATE_SIGN.as_ptr()) }
+    }
+
+    /// Stores one AVX-512 add-scaled vector into `target`.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn store_avx512_add_scaled(target: &mut [Complex<f32>], input: &[Complex<f32>], index: usize, scale_re: __m512, scale_im: __m512) {
+        let input_vector = unsafe { load_avx512(as_f32_slice(input), index * 2) };
+        let product = complex_scale_avx512(input_vector, scale_re, scale_im);
+        let target_vector = unsafe { load_avx512(as_f32_slice(target), index * 2) };
+        let output = _mm512_add_ps(target_vector, product);
+        unsafe { _mm512_storeu_ps(as_f32_slice_mut(target).as_mut_ptr().add(index * 2), output) };
+    }
+
+    /// Stores one AVX-512 complex multiplication vector into `output`.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn store_avx512_multiply(left: &[Complex<f32>], right: &[Complex<f32>], output: &mut [Complex<f32>], index: usize, sign: __m512) {
+        let left_vector = unsafe { load_avx512(as_f32_slice(left), index * 2) };
+        let right_vector = unsafe { load_avx512(as_f32_slice(right), index * 2) };
+        let product = complex_multiply_avx512(left_vector, right_vector, sign);
+        unsafe { _mm512_storeu_ps(as_f32_slice_mut(output).as_mut_ptr().add(index * 2), product) };
+    }
+
+    /// Stores one AVX-512 conjugate-multiply vector into `output`.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn store_avx512_conjugate_multiply(
+        left: &[Complex<f32>],
+        right: &[Complex<f32>],
+        output: &mut [Complex<f32>],
+        index: usize,
+        sign: __m512,
+        conjugate_sign: __m512,
+    ) {
+        let left_vector = unsafe { load_avx512(as_f32_slice(left), index * 2) };
+        let right_vector = unsafe { load_avx512(as_f32_slice(right), index * 2) };
+        let product = complex_conjugate_multiply_avx512(left_vector, right_vector, sign, conjugate_sign);
+        unsafe { _mm512_storeu_ps(as_f32_slice_mut(output).as_mut_ptr().add(index * 2), product) };
+    }
+
+    /// Multiplies packed AVX-512 complex values by a broadcast complex scalar.
+    #[target_feature(enable = "avx512f")]
+    fn complex_scale_avx512(input: __m512, scale_re: __m512, scale_im: __m512) -> __m512 {
+        let swapped = _mm512_permute_ps(input, 0xb1);
+        let real_product = _mm512_mul_ps(input, scale_re);
+        _mm512_fmadd_ps(swapped, scale_im, real_product)
+    }
+
+    /// Multiplies packed AVX-512 complex values pairwise.
+    #[target_feature(enable = "avx512f")]
+    fn complex_multiply_avx512(left: __m512, right: __m512, sign: __m512) -> __m512 {
+        let right_re = _mm512_permute_ps(right, 0xa0);
+        let right_im = _mm512_mul_ps(_mm512_permute_ps(right, 0xf5), sign);
+        complex_scale_avx512(left, right_re, right_im)
+    }
+
+    /// Multiplies packed conjugated AVX-512 complex values pairwise.
+    #[target_feature(enable = "avx512f")]
+    fn complex_conjugate_multiply_avx512(left: __m512, right: __m512, sign: __m512, conjugate_sign: __m512) -> __m512 {
+        let conjugated_left = _mm512_mul_ps(left, conjugate_sign);
+        complex_multiply_avx512(conjugated_left, right, sign)
+    }
+
+    /// Horizontally sums an AVX-512 f32 vector.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn horizontal_sum_avx512(input: __m512) -> f32 {
+        let mut values = [0.0; AVX512_F32_LANES];
+        unsafe { _mm512_storeu_ps(values.as_mut_ptr(), input) };
+        values.iter().sum()
+    }
+
+    /// Horizontally sums packed AVX-512 complex lanes.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn horizontal_complex_sum_avx512(input: __m512) -> Complex<f32> {
+        let mut values = [0.0; AVX512_F32_LANES];
+        unsafe { _mm512_storeu_ps(values.as_mut_ptr(), input) };
+        sum_interleaved_complex_lanes(&values)
+    }
+
+    /// Calculates eight AVX-512 complex magnitudes.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_magnitudes(input_f32: &[f32], index: usize) -> [f32; AVX512_COMPLEX_LANES] {
+        let values = unsafe { load_avx512(input_f32, index * 2) };
+        let squares = _mm512_mul_ps(values, values);
+        let paired = _mm512_add_ps(squares, _mm512_permute_ps(squares, 0xb1));
+        let roots = _mm512_sqrt_ps(paired);
+        let mut lanes = [0.0; AVX512_F32_LANES];
+        unsafe { _mm512_storeu_ps(lanes.as_mut_ptr(), roots) };
+        [lanes[0], lanes[2], lanes[4], lanes[6], lanes[8], lanes[10], lanes[12], lanes[14]]
+    }
+
+    /// Writes SSE2 f64 additions and returns the processed prefix length.
+    #[target_feature(enable = "sse2")]
+    unsafe fn add_f64_vectors(left: &[f64], right: &[f64], output: &mut [f64]) -> usize {
+        let end = vectorized_end(left.len(), SSE_F64_LANES);
+        let mut index = 0;
+        while index < end {
+            let sum = unsafe { _mm_add_pd(load_sse_f64(left, index), load_sse_f64(right, index)) };
+            unsafe { _mm_storeu_pd(output.as_mut_ptr().add(index), sum) };
+            index += SSE_F64_LANES;
+        }
+        end
+    }
+
+    /// Adds SSE2 f64 samples and returns the processed prefix length.
+    #[target_feature(enable = "sse2")]
+    unsafe fn add_assign_f64_vectors(target: &mut [f64], input: &[f64]) -> usize {
+        let end = vectorized_end(target.len(), SSE_F64_LANES);
+        let mut index = 0;
+        while index < end {
+            let sum = unsafe { _mm_add_pd(load_sse_f64(target, index), load_sse_f64(input, index)) };
+            unsafe { _mm_storeu_pd(target.as_mut_ptr().add(index), sum) };
+            index += SSE_F64_LANES;
+        }
+        end
+    }
+
+    /// Adds SSE2 f64 complex add-scaled values and returns processed samples.
+    #[target_feature(enable = "sse2")]
+    unsafe fn sse2_add_scaled_vectors_f64(target: &mut [Complex<f64>], scale: Complex<f64>, input: &[Complex<f64>]) -> usize {
+        let end = vectorized_end(input.len(), SSE_COMPLEX_LANES_F64);
+        let scale_re = _mm_set1_pd(scale.re);
+        let scale_im = unsafe { _mm_mul_pd(_mm_set1_pd(scale.im), load_sse_sign_f64()) };
+        let mut index = 0;
+        while index < end {
+            unsafe { store_sse_add_scaled_f64(target, input, index, scale_re, scale_im) };
+            index += SSE_COMPLEX_LANES_F64;
+        }
+        end
+    }
+
+    /// Writes SSE2 f64 complex products and returns processed samples.
+    #[target_feature(enable = "sse2")]
+    unsafe fn sse2_multiply_vectors_f64(left: &[Complex<f64>], right: &[Complex<f64>], output: &mut [Complex<f64>]) -> usize {
+        let end = vectorized_end(left.len(), SSE_COMPLEX_LANES_F64);
+        let sign = unsafe { load_sse_sign_f64() };
+        let mut index = 0;
+        while index < end {
+            unsafe { store_sse_multiply_f64(left, right, output, index, sign) };
+            index += SSE_COMPLEX_LANES_F64;
+        }
+        end
+    }
+
+    /// Writes SSE2 f64 conjugate-multiply products and returns samples.
+    #[target_feature(enable = "sse2")]
+    unsafe fn sse2_conjugate_multiply_vectors_f64(left: &[Complex<f64>], right: &[Complex<f64>], output: &mut [Complex<f64>]) -> usize {
+        let end = vectorized_end(left.len(), SSE_COMPLEX_LANES_F64);
+        let sign = unsafe { load_sse_sign_f64() };
+        let conjugate_sign = unsafe { load_sse_conjugate_sign_f64() };
+        let mut index = 0;
+        while index < end {
+            unsafe { store_sse_conjugate_multiply_f64(left, right, output, index, sign, conjugate_sign) };
+            index += SSE_COMPLEX_LANES_F64;
+        }
+        end
+    }
+
+    /// Returns the SSE2 f64 square sum and processed prefix length.
+    #[target_feature(enable = "sse2")]
+    unsafe fn sum_squared_f64_vectors(input: &[f64]) -> (usize, f64) {
+        let end = vectorized_end(input.len(), SSE_F64_LANES);
+        let mut accum = _mm_setzero_pd();
+        let mut index = 0;
+        while index < end {
+            let values = unsafe { load_sse_f64(input, index) };
+            accum = _mm_add_pd(accum, _mm_mul_pd(values, values));
+            index += SSE_F64_LANES;
+        }
+        (end, unsafe { horizontal_sum_sse_f64(accum) })
+    }
+
+    /// Writes SSE2 f64 magnitudes and returns processed samples.
+    #[target_feature(enable = "sse2")]
+    unsafe fn sse2_magnitude_vectors_f64(input: &[Complex<f64>], output: &mut [f64]) -> usize {
+        let end = vectorized_end(input.len(), SSE_COMPLEX_LANES_F64);
+        let input_f64 = as_f64_slice(input);
+        let mut index = 0;
+        while index < end {
+            output[index] = unsafe { sse2_magnitude_f64(input_f64, index) };
+            index += SSE_COMPLEX_LANES_F64;
+        }
+        end
+    }
+
+    /// Returns the SSE2 f64 sum of pairwise complex products.
+    #[target_feature(enable = "sse2")]
+    unsafe fn sse2_complex_multiply_sum_f64(left: &[Complex<f64>], right: &[Complex<f64>]) -> Complex<f64> {
+        let (end, sum) = unsafe { sse2_complex_multiply_sum_vectors_f64(left, right) };
+        sum + scalar::multiply_sum_tail_f64(left, right, end)
+    }
+
+    /// Returns the SSE2 f64 vector sum and processed complex samples.
+    #[target_feature(enable = "sse2")]
+    unsafe fn sse2_complex_multiply_sum_vectors_f64(left: &[Complex<f64>], right: &[Complex<f64>]) -> (usize, Complex<f64>) {
+        let end = vectorized_end(left.len(), SSE_COMPLEX_LANES_F64);
+        let sign = unsafe { load_sse_sign_f64() };
+        let mut accum = _mm_setzero_pd();
+        let mut index = 0;
+        while index < end {
+            let left_vector = unsafe { load_sse_f64(as_f64_slice(left), index * 2) };
+            let right_vector = unsafe { load_sse_f64(as_f64_slice(right), index * 2) };
+            accum = _mm_add_pd(accum, unsafe { complex_multiply_sse_f64(left_vector, right_vector, sign) });
+            index += SSE_COMPLEX_LANES_F64;
+        }
+        (end, unsafe { horizontal_complex_sum_sse_f64(accum) })
+    }
+
+    /// Returns the SSE2 f64 conjugate-multiply vector sum and samples.
+    #[target_feature(enable = "sse2")]
+    unsafe fn sse2_complex_conjugate_multiply_sum_vectors_f64(left: &[Complex<f64>], right: &[Complex<f64>]) -> (usize, Complex<f64>) {
+        let end = vectorized_end(left.len(), SSE_COMPLEX_LANES_F64);
+        let sign = unsafe { load_sse_sign_f64() };
+        let conjugate_sign = unsafe { load_sse_conjugate_sign_f64() };
+        let mut accum = _mm_setzero_pd();
+        let mut index = 0;
+        while index < end {
+            let left_vector = unsafe { load_sse_f64(as_f64_slice(left), index * 2) };
+            let right_vector = unsafe { load_sse_f64(as_f64_slice(right), index * 2) };
+            accum = _mm_add_pd(accum, unsafe {
+                complex_conjugate_multiply_sse_f64(left_vector, right_vector, sign, conjugate_sign)
+            });
+            index += SSE_COMPLEX_LANES_F64;
+        }
+        (end, unsafe { horizontal_complex_sum_sse_f64(accum) })
+    }
+
+    /// Writes AVX2 f64 additions and returns the processed prefix length.
+    #[target_feature(enable = "avx2")]
+    unsafe fn avx2_add_f64_vectors(left: &[f64], right: &[f64], output: &mut [f64]) -> usize {
+        let end = vectorized_end(left.len(), AVX2_F64_LANES);
+        let mut index = 0;
+        while index < end {
+            let sum = unsafe { _mm256_add_pd(load_avx2_f64(left, index), load_avx2_f64(right, index)) };
+            unsafe { _mm256_storeu_pd(output.as_mut_ptr().add(index), sum) };
+            index += AVX2_F64_LANES;
+        }
+        end
+    }
+
+    /// Adds AVX2 f64 samples and returns the processed prefix length.
+    #[target_feature(enable = "avx2")]
+    unsafe fn avx2_add_assign_f64_vectors(target: &mut [f64], input: &[f64]) -> usize {
+        let end = vectorized_end(target.len(), AVX2_F64_LANES);
+        let mut index = 0;
+        while index < end {
+            let sum = unsafe { _mm256_add_pd(load_avx2_f64(target, index), load_avx2_f64(input, index)) };
+            unsafe { _mm256_storeu_pd(target.as_mut_ptr().add(index), sum) };
+            index += AVX2_F64_LANES;
+        }
+        end
+    }
+
+    /// Adds AVX2 f64 complex add-scaled values and returns samples.
+    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "fma")]
+    unsafe fn avx2_add_scaled_vectors_f64(target: &mut [Complex<f64>], scale: Complex<f64>, input: &[Complex<f64>]) -> usize {
+        let end = vectorized_end(input.len(), AVX2_COMPLEX_LANES_F64);
+        let scale_re = _mm256_set1_pd(scale.re);
+        let scale_im = unsafe { _mm256_mul_pd(_mm256_set1_pd(scale.im), load_avx2_sign_f64()) };
+        let mut index = 0;
+        while index < end {
+            unsafe { store_avx2_add_scaled_f64(target, input, index, scale_re, scale_im) };
+            index += AVX2_COMPLEX_LANES_F64;
+        }
+        end
+    }
+
+    /// Writes AVX2 f64 complex products and returns processed samples.
+    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "fma")]
+    unsafe fn avx2_multiply_vectors_f64(left: &[Complex<f64>], right: &[Complex<f64>], output: &mut [Complex<f64>]) -> usize {
+        let end = vectorized_end(left.len(), AVX2_COMPLEX_LANES_F64);
+        let sign = unsafe { load_avx2_sign_f64() };
+        let mut index = 0;
+        while index < end {
+            unsafe { store_avx2_multiply_f64(left, right, output, index, sign) };
+            index += AVX2_COMPLEX_LANES_F64;
+        }
+        end
+    }
+
+    /// Writes AVX2 f64 conjugate-multiply products and returns samples.
+    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "fma")]
+    unsafe fn avx2_conjugate_multiply_vectors_f64(left: &[Complex<f64>], right: &[Complex<f64>], output: &mut [Complex<f64>]) -> usize {
+        let end = vectorized_end(left.len(), AVX2_COMPLEX_LANES_F64);
+        let sign = unsafe { load_avx2_sign_f64() };
+        let conjugate_sign = unsafe { load_avx2_conjugate_sign_f64() };
+        let mut index = 0;
+        while index < end {
+            unsafe { store_avx2_conjugate_multiply_f64(left, right, output, index, sign, conjugate_sign) };
+            index += AVX2_COMPLEX_LANES_F64;
+        }
+        end
+    }
+
+    /// Returns the AVX2 f64 square sum and processed prefix length.
+    #[target_feature(enable = "avx2")]
+    unsafe fn avx2_sum_squared_f64_vectors(input: &[f64]) -> (usize, f64) {
+        let end = vectorized_end(input.len(), AVX2_F64_LANES);
+        let mut accum = _mm256_setzero_pd();
+        let mut index = 0;
+        while index < end {
+            let values = unsafe { load_avx2_f64(input, index) };
+            accum = _mm256_add_pd(accum, _mm256_mul_pd(values, values));
+            index += AVX2_F64_LANES;
+        }
+        (end, unsafe { horizontal_sum_avx2_f64(accum) })
+    }
+
+    /// Writes AVX2 f64 magnitudes and returns processed samples.
+    #[target_feature(enable = "avx2")]
+    unsafe fn avx2_magnitude_vectors_f64(input: &[Complex<f64>], output: &mut [f64]) -> usize {
+        let end = vectorized_end(input.len(), AVX2_COMPLEX_LANES_F64);
+        let input_f64 = as_f64_slice(input);
+        let mut index = 0;
+        while index < end {
+            let magnitudes = unsafe { avx2_magnitudes_f64(input_f64, index) };
+            output[index..index + AVX2_COMPLEX_LANES_F64].copy_from_slice(&magnitudes);
+            index += AVX2_COMPLEX_LANES_F64;
+        }
+        end
+    }
+
+    /// Returns the AVX2 f64 sum of pairwise complex products.
+    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "fma")]
+    unsafe fn avx2_complex_multiply_sum_f64(left: &[Complex<f64>], right: &[Complex<f64>]) -> Complex<f64> {
+        let (end, sum) = unsafe { avx2_complex_multiply_sum_vectors_f64(left, right) };
+        sum + scalar::multiply_sum_tail_f64(left, right, end)
+    }
+
+    /// Returns the AVX2 f64 vector sum and processed complex samples.
+    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "fma")]
+    unsafe fn avx2_complex_multiply_sum_vectors_f64(left: &[Complex<f64>], right: &[Complex<f64>]) -> (usize, Complex<f64>) {
+        let end = vectorized_end(left.len(), AVX2_COMPLEX_LANES_F64);
+        let sign = unsafe { load_avx2_sign_f64() };
+        let mut accum = _mm256_setzero_pd();
+        let mut index = 0;
+        while index < end {
+            let left_vector = unsafe { load_avx2_f64(as_f64_slice(left), index * 2) };
+            let right_vector = unsafe { load_avx2_f64(as_f64_slice(right), index * 2) };
+            accum = _mm256_add_pd(accum, complex_multiply_avx2_f64(left_vector, right_vector, sign));
+            index += AVX2_COMPLEX_LANES_F64;
+        }
+        (end, unsafe { horizontal_complex_sum_avx2_f64(accum) })
+    }
+
+    /// Returns the AVX2 f64 conjugate-multiply vector sum and samples.
+    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "fma")]
+    unsafe fn avx2_complex_conjugate_multiply_sum_vectors_f64(left: &[Complex<f64>], right: &[Complex<f64>]) -> (usize, Complex<f64>) {
+        let end = vectorized_end(left.len(), AVX2_COMPLEX_LANES_F64);
+        let sign = unsafe { load_avx2_sign_f64() };
+        let conjugate_sign = unsafe { load_avx2_conjugate_sign_f64() };
+        let mut accum = _mm256_setzero_pd();
+        let mut index = 0;
+        while index < end {
+            let left_vector = unsafe { load_avx2_f64(as_f64_slice(left), index * 2) };
+            let right_vector = unsafe { load_avx2_f64(as_f64_slice(right), index * 2) };
+            accum = _mm256_add_pd(
+                accum,
+                complex_conjugate_multiply_avx2_f64(left_vector, right_vector, sign, conjugate_sign),
+            );
+            index += AVX2_COMPLEX_LANES_F64;
+        }
+        (end, unsafe { horizontal_complex_sum_avx2_f64(accum) })
+    }
+
+    /// Writes AVX-512 f64 additions and returns the processed prefix length.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_add_f64_vectors(left: &[f64], right: &[f64], output: &mut [f64]) -> usize {
+        let end = vectorized_end(left.len(), AVX512_F64_LANES);
+        let mut index = 0;
+        while index < end {
+            let sum = unsafe { _mm512_add_pd(load_avx512_f64(left, index), load_avx512_f64(right, index)) };
+            unsafe { _mm512_storeu_pd(output.as_mut_ptr().add(index), sum) };
+            index += AVX512_F64_LANES;
+        }
+        end
+    }
+
+    /// Adds AVX-512 f64 samples and returns the processed prefix length.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_add_assign_f64_vectors(target: &mut [f64], input: &[f64]) -> usize {
+        let end = vectorized_end(target.len(), AVX512_F64_LANES);
+        let mut index = 0;
+        while index < end {
+            let sum = unsafe { _mm512_add_pd(load_avx512_f64(target, index), load_avx512_f64(input, index)) };
+            unsafe { _mm512_storeu_pd(target.as_mut_ptr().add(index), sum) };
+            index += AVX512_F64_LANES;
+        }
+        end
+    }
+
+    /// Adds AVX-512 f64 complex add-scaled values and returns samples.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_add_scaled_vectors_f64(target: &mut [Complex<f64>], scale: Complex<f64>, input: &[Complex<f64>]) -> usize {
+        let end = vectorized_end(input.len(), AVX512_COMPLEX_LANES_F64);
+        let scale_re = _mm512_set1_pd(scale.re);
+        let scale_im = unsafe { _mm512_mul_pd(_mm512_set1_pd(scale.im), load_avx512_sign_f64()) };
+        let mut index = 0;
+        while index < end {
+            unsafe { store_avx512_add_scaled_f64(target, input, index, scale_re, scale_im) };
+            index += AVX512_COMPLEX_LANES_F64;
+        }
+        end
+    }
+
+    /// Writes AVX-512 f64 complex products and returns processed samples.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_multiply_vectors_f64(left: &[Complex<f64>], right: &[Complex<f64>], output: &mut [Complex<f64>]) -> usize {
+        let end = vectorized_end(left.len(), AVX512_COMPLEX_LANES_F64);
+        let sign = unsafe { load_avx512_sign_f64() };
+        let mut index = 0;
+        while index < end {
+            unsafe { store_avx512_multiply_f64(left, right, output, index, sign) };
+            index += AVX512_COMPLEX_LANES_F64;
+        }
+        end
+    }
+
+    /// Writes AVX-512 f64 conjugate-multiply products and returns samples.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_conjugate_multiply_vectors_f64(left: &[Complex<f64>], right: &[Complex<f64>], output: &mut [Complex<f64>]) -> usize {
+        let end = vectorized_end(left.len(), AVX512_COMPLEX_LANES_F64);
+        let sign = unsafe { load_avx512_sign_f64() };
+        let conjugate_sign = unsafe { load_avx512_conjugate_sign_f64() };
+        let mut index = 0;
+        while index < end {
+            unsafe { store_avx512_conjugate_multiply_f64(left, right, output, index, sign, conjugate_sign) };
+            index += AVX512_COMPLEX_LANES_F64;
+        }
+        end
+    }
+
+    /// Returns the AVX-512 f64 square sum and processed prefix length.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_sum_squared_f64_vectors(input: &[f64]) -> (usize, f64) {
+        let end = vectorized_end(input.len(), AVX512_F64_LANES);
+        let mut accum = _mm512_setzero_pd();
+        let mut index = 0;
+        while index < end {
+            let values = unsafe { load_avx512_f64(input, index) };
+            accum = _mm512_add_pd(accum, _mm512_mul_pd(values, values));
+            index += AVX512_F64_LANES;
+        }
+        (end, unsafe { horizontal_sum_avx512_f64(accum) })
+    }
+
+    /// Writes AVX-512 f64 magnitudes and returns processed samples.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_magnitude_vectors_f64(input: &[Complex<f64>], output: &mut [f64]) -> usize {
+        let end = vectorized_end(input.len(), AVX512_COMPLEX_LANES_F64);
+        let input_f64 = as_f64_slice(input);
+        let mut index = 0;
+        while index < end {
+            let magnitudes = unsafe { avx512_magnitudes_f64(input_f64, index) };
+            output[index..index + AVX512_COMPLEX_LANES_F64].copy_from_slice(&magnitudes);
+            index += AVX512_COMPLEX_LANES_F64;
+        }
+        end
+    }
+
+    /// Returns the AVX-512 f64 sum of pairwise complex products.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_complex_multiply_sum_f64(left: &[Complex<f64>], right: &[Complex<f64>]) -> Complex<f64> {
+        let (end, sum) = unsafe { avx512_complex_multiply_sum_vectors_f64(left, right) };
+        sum + scalar::multiply_sum_tail_f64(left, right, end)
+    }
+
+    /// Returns the AVX-512 f64 vector sum and processed complex samples.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_complex_multiply_sum_vectors_f64(left: &[Complex<f64>], right: &[Complex<f64>]) -> (usize, Complex<f64>) {
+        let end = vectorized_end(left.len(), AVX512_COMPLEX_LANES_F64);
+        let sign = unsafe { load_avx512_sign_f64() };
+        let mut accum = _mm512_setzero_pd();
+        let mut index = 0;
+        while index < end {
+            let left_vector = unsafe { load_avx512_f64(as_f64_slice(left), index * 2) };
+            let right_vector = unsafe { load_avx512_f64(as_f64_slice(right), index * 2) };
+            accum = _mm512_add_pd(accum, complex_multiply_avx512_f64(left_vector, right_vector, sign));
+            index += AVX512_COMPLEX_LANES_F64;
+        }
+        (end, unsafe { horizontal_complex_sum_avx512_f64(accum) })
+    }
+
+    /// Returns the AVX-512 f64 conjugate-multiply vector sum and samples.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_complex_conjugate_multiply_sum_vectors_f64(left: &[Complex<f64>], right: &[Complex<f64>]) -> (usize, Complex<f64>) {
+        let end = vectorized_end(left.len(), AVX512_COMPLEX_LANES_F64);
+        let sign = unsafe { load_avx512_sign_f64() };
+        let conjugate_sign = unsafe { load_avx512_conjugate_sign_f64() };
+        let mut accum = _mm512_setzero_pd();
+        let mut index = 0;
+        while index < end {
+            let left_vector = unsafe { load_avx512_f64(as_f64_slice(left), index * 2) };
+            let right_vector = unsafe { load_avx512_f64(as_f64_slice(right), index * 2) };
+            accum = _mm512_add_pd(
+                accum,
+                complex_conjugate_multiply_avx512_f64(left_vector, right_vector, sign, conjugate_sign),
+            );
+            index += AVX512_COMPLEX_LANES_F64;
+        }
+        (end, unsafe { horizontal_complex_sum_avx512_f64(accum) })
+    }
+
+    /// Loads two f64 values from an unaligned slice offset.
+    #[target_feature(enable = "sse2")]
+    unsafe fn load_sse_f64(input: &[f64], index: usize) -> __m128d {
+        unsafe { _mm_loadu_pd(input.as_ptr().add(index)) }
+    }
+
+    /// Loads the SSE f64 complex sign pattern.
+    #[target_feature(enable = "sse2")]
+    unsafe fn load_sse_sign_f64() -> __m128d {
+        unsafe { _mm_loadu_pd(SSE_SIGN_F64.as_ptr()) }
+    }
+
+    /// Loads the SSE f64 conjugate sign pattern.
+    #[target_feature(enable = "sse2")]
+    unsafe fn load_sse_conjugate_sign_f64() -> __m128d {
+        unsafe { _mm_loadu_pd(SSE_CONJUGATE_SIGN_F64.as_ptr()) }
+    }
+
+    /// Stores one SSE f64 add-scaled vector into `target`.
+    #[target_feature(enable = "sse2")]
+    unsafe fn store_sse_add_scaled_f64(target: &mut [Complex<f64>], input: &[Complex<f64>], index: usize, scale_re: __m128d, scale_im: __m128d) {
+        let input_vector = unsafe { load_sse_f64(as_f64_slice(input), index * 2) };
+        let product = unsafe { complex_scale_sse_f64(input_vector, scale_re, scale_im) };
+        let target_vector = unsafe { load_sse_f64(as_f64_slice(target), index * 2) };
+        let output = _mm_add_pd(target_vector, product);
+        unsafe { _mm_storeu_pd(as_f64_slice_mut(target).as_mut_ptr().add(index * 2), output) };
+    }
+
+    /// Stores one SSE f64 complex multiplication vector into `output`.
+    #[target_feature(enable = "sse2")]
+    unsafe fn store_sse_multiply_f64(left: &[Complex<f64>], right: &[Complex<f64>], output: &mut [Complex<f64>], index: usize, sign: __m128d) {
+        let left_vector = unsafe { load_sse_f64(as_f64_slice(left), index * 2) };
+        let right_vector = unsafe { load_sse_f64(as_f64_slice(right), index * 2) };
+        let product = unsafe { complex_multiply_sse_f64(left_vector, right_vector, sign) };
+        unsafe { _mm_storeu_pd(as_f64_slice_mut(output).as_mut_ptr().add(index * 2), product) };
+    }
+
+    /// Stores one SSE f64 conjugate-multiply vector into `output`.
+    #[target_feature(enable = "sse2")]
+    unsafe fn store_sse_conjugate_multiply_f64(
+        left: &[Complex<f64>],
+        right: &[Complex<f64>],
+        output: &mut [Complex<f64>],
+        index: usize,
+        sign: __m128d,
+        conjugate_sign: __m128d,
+    ) {
+        let left_vector = unsafe { load_sse_f64(as_f64_slice(left), index * 2) };
+        let right_vector = unsafe { load_sse_f64(as_f64_slice(right), index * 2) };
+        let product = unsafe { complex_conjugate_multiply_sse_f64(left_vector, right_vector, sign, conjugate_sign) };
+        unsafe { _mm_storeu_pd(as_f64_slice_mut(output).as_mut_ptr().add(index * 2), product) };
+    }
+
+    /// Multiplies packed SSE f64 complex values by a broadcast scalar.
+    #[target_feature(enable = "sse2")]
+    unsafe fn complex_scale_sse_f64(input: __m128d, scale_re: __m128d, scale_im: __m128d) -> __m128d {
+        let swapped = _mm_shuffle_pd(input, input, 0b01);
+        let real_product = _mm_mul_pd(input, scale_re);
+        let imag_product = _mm_mul_pd(swapped, scale_im);
+        _mm_add_pd(real_product, imag_product)
+    }
+
+    /// Multiplies packed SSE f64 complex values pairwise.
+    #[target_feature(enable = "sse2")]
+    unsafe fn complex_multiply_sse_f64(left: __m128d, right: __m128d, sign: __m128d) -> __m128d {
+        let right_re = _mm_shuffle_pd(right, right, 0b00);
+        let right_im = _mm_mul_pd(_mm_shuffle_pd(right, right, 0b11), sign);
+        unsafe { complex_scale_sse_f64(left, right_re, right_im) }
+    }
+
+    /// Multiplies packed conjugated SSE f64 complex values pairwise.
+    #[target_feature(enable = "sse2")]
+    unsafe fn complex_conjugate_multiply_sse_f64(left: __m128d, right: __m128d, sign: __m128d, conjugate_sign: __m128d) -> __m128d {
+        let conjugated_left = _mm_mul_pd(left, conjugate_sign);
+        unsafe { complex_multiply_sse_f64(conjugated_left, right, sign) }
+    }
+
+    /// Horizontally sums an SSE f64 vector.
+    #[target_feature(enable = "sse2")]
+    unsafe fn horizontal_sum_sse_f64(input: __m128d) -> f64 {
+        let mut values = [0.0; SSE_F64_LANES];
+        unsafe { _mm_storeu_pd(values.as_mut_ptr(), input) };
+        values.iter().sum()
+    }
+
+    /// Horizontally sums packed SSE f64 complex lanes.
+    #[target_feature(enable = "sse2")]
+    unsafe fn horizontal_complex_sum_sse_f64(input: __m128d) -> Complex<f64> {
+        let mut values = [0.0; SSE_F64_LANES];
+        unsafe { _mm_storeu_pd(values.as_mut_ptr(), input) };
+        sum_interleaved_complex_lanes(&values)
+    }
+
+    /// Calculates one SSE f64 complex magnitude.
+    #[target_feature(enable = "sse2")]
+    unsafe fn sse2_magnitude_f64(input_f64: &[f64], index: usize) -> f64 {
+        let values = unsafe { load_sse_f64(input_f64, index * 2) };
+        let squares = _mm_mul_pd(values, values);
+        let paired = _mm_add_pd(squares, _mm_shuffle_pd(squares, squares, 0b01));
+        let roots = _mm_sqrt_pd(paired);
+        let mut lanes = [0.0; SSE_F64_LANES];
+        unsafe { _mm_storeu_pd(lanes.as_mut_ptr(), roots) };
+        lanes[0]
+    }
+
+    /// Loads four f64 values from an unaligned slice offset.
+    #[target_feature(enable = "avx2")]
+    unsafe fn load_avx2_f64(input: &[f64], index: usize) -> __m256d {
+        unsafe { _mm256_loadu_pd(input.as_ptr().add(index)) }
+    }
+
+    /// Loads the AVX2 f64 complex sign pattern.
+    #[target_feature(enable = "avx2")]
+    unsafe fn load_avx2_sign_f64() -> __m256d {
+        unsafe { _mm256_loadu_pd(AVX2_SIGN_F64.as_ptr()) }
+    }
+
+    /// Loads the AVX2 f64 conjugate sign pattern.
+    #[target_feature(enable = "avx2")]
+    unsafe fn load_avx2_conjugate_sign_f64() -> __m256d {
+        unsafe { _mm256_loadu_pd(AVX2_CONJUGATE_SIGN_F64.as_ptr()) }
+    }
+
+    /// Stores one AVX2 f64 add-scaled vector into `target`.
+    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "fma")]
+    unsafe fn store_avx2_add_scaled_f64(
+        target: &mut [Complex<f64>],
+        input: &[Complex<f64>],
+        index: usize,
+        scale_re: __m256d,
+        scale_im: __m256d,
+    ) {
+        let input_vector = unsafe { load_avx2_f64(as_f64_slice(input), index * 2) };
+        let product = complex_scale_avx2_f64(input_vector, scale_re, scale_im);
+        let target_vector = unsafe { load_avx2_f64(as_f64_slice(target), index * 2) };
+        let output = _mm256_add_pd(target_vector, product);
+        unsafe { _mm256_storeu_pd(as_f64_slice_mut(target).as_mut_ptr().add(index * 2), output) };
+    }
+
+    /// Stores one AVX2 f64 complex multiplication vector into `output`.
+    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "fma")]
+    unsafe fn store_avx2_multiply_f64(left: &[Complex<f64>], right: &[Complex<f64>], output: &mut [Complex<f64>], index: usize, sign: __m256d) {
+        let left_vector = unsafe { load_avx2_f64(as_f64_slice(left), index * 2) };
+        let right_vector = unsafe { load_avx2_f64(as_f64_slice(right), index * 2) };
+        let product = complex_multiply_avx2_f64(left_vector, right_vector, sign);
+        unsafe { _mm256_storeu_pd(as_f64_slice_mut(output).as_mut_ptr().add(index * 2), product) };
+    }
+
+    /// Stores one AVX2 f64 conjugate-multiply vector into `output`.
+    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "fma")]
+    unsafe fn store_avx2_conjugate_multiply_f64(
+        left: &[Complex<f64>],
+        right: &[Complex<f64>],
+        output: &mut [Complex<f64>],
+        index: usize,
+        sign: __m256d,
+        conjugate_sign: __m256d,
+    ) {
+        let left_vector = unsafe { load_avx2_f64(as_f64_slice(left), index * 2) };
+        let right_vector = unsafe { load_avx2_f64(as_f64_slice(right), index * 2) };
+        let product = complex_conjugate_multiply_avx2_f64(left_vector, right_vector, sign, conjugate_sign);
+        unsafe { _mm256_storeu_pd(as_f64_slice_mut(output).as_mut_ptr().add(index * 2), product) };
+    }
+
+    /// Multiplies packed AVX2 f64 complex values by a broadcast scalar.
+    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "fma")]
+    fn complex_scale_avx2_f64(input: __m256d, scale_re: __m256d, scale_im: __m256d) -> __m256d {
+        let swapped = _mm256_permute_pd(input, 0b0101);
+        let real_product = _mm256_mul_pd(input, scale_re);
+        _mm256_fmadd_pd(swapped, scale_im, real_product)
+    }
+
+    /// Multiplies packed AVX2 f64 complex values pairwise.
+    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "fma")]
+    fn complex_multiply_avx2_f64(left: __m256d, right: __m256d, sign: __m256d) -> __m256d {
+        let right_re = _mm256_permute_pd(right, 0b0000);
+        let right_im = _mm256_mul_pd(_mm256_permute_pd(right, 0b1111), sign);
+        complex_scale_avx2_f64(left, right_re, right_im)
+    }
+
+    /// Multiplies packed conjugated AVX2 f64 complex values pairwise.
+    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "fma")]
+    fn complex_conjugate_multiply_avx2_f64(left: __m256d, right: __m256d, sign: __m256d, conjugate_sign: __m256d) -> __m256d {
+        let conjugated_left = _mm256_mul_pd(left, conjugate_sign);
+        complex_multiply_avx2_f64(conjugated_left, right, sign)
+    }
+
+    /// Horizontally sums an AVX2 f64 vector.
+    #[target_feature(enable = "avx2")]
+    unsafe fn horizontal_sum_avx2_f64(input: __m256d) -> f64 {
+        let mut values = [0.0; AVX2_F64_LANES];
+        unsafe { _mm256_storeu_pd(values.as_mut_ptr(), input) };
+        values.iter().sum()
+    }
+
+    /// Horizontally sums packed AVX2 f64 complex lanes.
+    #[target_feature(enable = "avx2")]
+    unsafe fn horizontal_complex_sum_avx2_f64(input: __m256d) -> Complex<f64> {
+        let mut values = [0.0; AVX2_F64_LANES];
+        unsafe { _mm256_storeu_pd(values.as_mut_ptr(), input) };
+        sum_interleaved_complex_lanes(&values)
+    }
+
+    /// Calculates two AVX2 f64 complex magnitudes.
+    #[target_feature(enable = "avx2")]
+    unsafe fn avx2_magnitudes_f64(input_f64: &[f64], index: usize) -> [f64; AVX2_COMPLEX_LANES_F64] {
+        let values = unsafe { load_avx2_f64(input_f64, index * 2) };
+        let squares = _mm256_mul_pd(values, values);
+        let paired = _mm256_add_pd(squares, _mm256_permute_pd(squares, 0b0101));
+        let roots = _mm256_sqrt_pd(paired);
+        let mut lanes = [0.0; AVX2_F64_LANES];
+        unsafe { _mm256_storeu_pd(lanes.as_mut_ptr(), roots) };
+        [lanes[0], lanes[2]]
+    }
+
+    /// Loads eight f64 values from an unaligned slice offset.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn load_avx512_f64(input: &[f64], index: usize) -> __m512d {
+        unsafe { _mm512_loadu_pd(input.as_ptr().add(index)) }
+    }
+
+    /// Loads the AVX-512 f64 complex sign pattern.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn load_avx512_sign_f64() -> __m512d {
+        unsafe { _mm512_loadu_pd(AVX512_SIGN_F64.as_ptr()) }
+    }
+
+    /// Loads the AVX-512 f64 conjugate sign pattern.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn load_avx512_conjugate_sign_f64() -> __m512d {
+        unsafe { _mm512_loadu_pd(AVX512_CONJUGATE_SIGN_F64.as_ptr()) }
+    }
+
+    /// Stores one AVX-512 f64 add-scaled vector into `target`.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn store_avx512_add_scaled_f64(
+        target: &mut [Complex<f64>],
+        input: &[Complex<f64>],
+        index: usize,
+        scale_re: __m512d,
+        scale_im: __m512d,
+    ) {
+        let input_vector = unsafe { load_avx512_f64(as_f64_slice(input), index * 2) };
+        let product = complex_scale_avx512_f64(input_vector, scale_re, scale_im);
+        let target_vector = unsafe { load_avx512_f64(as_f64_slice(target), index * 2) };
+        let output = _mm512_add_pd(target_vector, product);
+        unsafe { _mm512_storeu_pd(as_f64_slice_mut(target).as_mut_ptr().add(index * 2), output) };
+    }
+
+    /// Stores one AVX-512 f64 complex multiplication vector into `output`.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn store_avx512_multiply_f64(
+        left: &[Complex<f64>],
+        right: &[Complex<f64>],
+        output: &mut [Complex<f64>],
+        index: usize,
+        sign: __m512d,
+    ) {
+        let left_vector = unsafe { load_avx512_f64(as_f64_slice(left), index * 2) };
+        let right_vector = unsafe { load_avx512_f64(as_f64_slice(right), index * 2) };
+        let product = complex_multiply_avx512_f64(left_vector, right_vector, sign);
+        unsafe { _mm512_storeu_pd(as_f64_slice_mut(output).as_mut_ptr().add(index * 2), product) };
+    }
+
+    /// Stores one AVX-512 f64 conjugate-multiply vector into `output`.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn store_avx512_conjugate_multiply_f64(
+        left: &[Complex<f64>],
+        right: &[Complex<f64>],
+        output: &mut [Complex<f64>],
+        index: usize,
+        sign: __m512d,
+        conjugate_sign: __m512d,
+    ) {
+        let left_vector = unsafe { load_avx512_f64(as_f64_slice(left), index * 2) };
+        let right_vector = unsafe { load_avx512_f64(as_f64_slice(right), index * 2) };
+        let product = complex_conjugate_multiply_avx512_f64(left_vector, right_vector, sign, conjugate_sign);
+        unsafe { _mm512_storeu_pd(as_f64_slice_mut(output).as_mut_ptr().add(index * 2), product) };
+    }
+
+    /// Multiplies packed AVX-512 f64 complex values by a broadcast scalar.
+    #[target_feature(enable = "avx512f")]
+    fn complex_scale_avx512_f64(input: __m512d, scale_re: __m512d, scale_im: __m512d) -> __m512d {
+        let swapped = _mm512_permute_pd(input, 0b01010101);
+        let real_product = _mm512_mul_pd(input, scale_re);
+        _mm512_fmadd_pd(swapped, scale_im, real_product)
+    }
+
+    /// Multiplies packed AVX-512 f64 complex values pairwise.
+    #[target_feature(enable = "avx512f")]
+    fn complex_multiply_avx512_f64(left: __m512d, right: __m512d, sign: __m512d) -> __m512d {
+        let right_re = _mm512_permute_pd(right, 0b00000000);
+        let right_im = _mm512_mul_pd(_mm512_permute_pd(right, 0b11111111), sign);
+        complex_scale_avx512_f64(left, right_re, right_im)
+    }
+
+    /// Multiplies packed conjugated AVX-512 f64 complex values pairwise.
+    #[target_feature(enable = "avx512f")]
+    fn complex_conjugate_multiply_avx512_f64(left: __m512d, right: __m512d, sign: __m512d, conjugate_sign: __m512d) -> __m512d {
+        let conjugated_left = _mm512_mul_pd(left, conjugate_sign);
+        complex_multiply_avx512_f64(conjugated_left, right, sign)
+    }
+
+    /// Horizontally sums an AVX-512 f64 vector.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn horizontal_sum_avx512_f64(input: __m512d) -> f64 {
+        let mut values = [0.0; AVX512_F64_LANES];
+        unsafe { _mm512_storeu_pd(values.as_mut_ptr(), input) };
+        values.iter().sum()
+    }
+
+    /// Horizontally sums packed AVX-512 f64 complex lanes.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn horizontal_complex_sum_avx512_f64(input: __m512d) -> Complex<f64> {
+        let mut values = [0.0; AVX512_F64_LANES];
+        unsafe { _mm512_storeu_pd(values.as_mut_ptr(), input) };
+        sum_interleaved_complex_lanes(&values)
+    }
+
+    /// Calculates four AVX-512 f64 complex magnitudes.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_magnitudes_f64(input_f64: &[f64], index: usize) -> [f64; AVX512_COMPLEX_LANES_F64] {
+        let values = unsafe { load_avx512_f64(input_f64, index * 2) };
+        let squares = _mm512_mul_pd(values, values);
+        let paired = _mm512_add_pd(squares, _mm512_permute_pd(squares, 0b01010101));
+        let roots = _mm512_sqrt_pd(paired);
+        let mut lanes = [0.0; AVX512_F64_LANES];
+        unsafe { _mm512_storeu_pd(lanes.as_mut_ptr(), roots) };
+        [lanes[0], lanes[2], lanes[4], lanes[6]]
     }
 }
-
-// ============================================================================
-// Tests
-// ============================================================================
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_f32_add() {
-        let a = VectorSimd::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0]);
-        let b = VectorSimd::from_vec(vec![5.0f32, 6.0, 7.0, 8.0, 9.0]);
-
-        let c = &a + &b;
-        assert_eq!(c[0], 6.0);
-        assert_eq!(c[1], 8.0);
-        assert_eq!(c[4], 14.0);
-    }
+    const EPSILON: f32 = 1.0e-4;
+    const EPSILON_F64: f64 = 1.0e-10;
 
     #[test]
-    fn test_f32_mul_scalar() {
-        let a = VectorSimd::from_vec(vec![1.0f32, 2.0, 3.0, 4.0]);
-        let b = &a * 2.0;
-
-        assert_eq!(b[0], 2.0);
-        assert_eq!(b[3], 8.0);
+    fn selected_plan_matches_backend_geometry() {
+        let plan = selected_iq_vector_plan();
+        assert_eq!(plan.backend(), SELECTED_BACKEND);
+        assert_eq!(plan.register_bits(), REGISTER_BITS);
+        assert_eq!(plan.iq_lanes(), IQ_LANES);
+        assert_eq!(plan.iq_lanes_f32(), IQ_LANES_F32);
+        assert_eq!(plan.iq_lanes_f64(), IQ_LANES_F64);
+        assert_eq!(plan.iq_lanes_for::<f32>(), IQ_LANES_F32);
+        assert_eq!(plan.iq_lanes_for::<f64>(), IQ_LANES_F64);
     }
 
     #[test]
-    fn test_f32_div_assign() {
-        let mut v = VectorSimd::from_vec(vec![10.0f32, 20.0, 30.0]);
-        v /= 2.0;
-
-        assert_eq!(v[0], 5.0);
-        assert_eq!(v[1], 10.0);
-        assert_eq!(v[2], 15.0);
-    }
-
-    #[test]
-    fn test_complex_operations() {
-        let a = VectorSimd::from_vec(vec![
-            Complex::new(2.0f32, 3.0),
-            Complex::new(4.0, 5.0),
-        ]);
-        let b = VectorSimd::from_vec(vec![
-            Complex::new(4.0f32, 5.0),
-            Complex::new(6.0, 7.0),
-        ]);
-
-        let c = &a * &b;
-        // (2+3i) * (4+5i) = 8 + 10i + 12i + 15i² = 8 + 22i - 15 = -7 + 22i
-        assert_eq!(c[0].re, -7.0);
-        assert_eq!(c[0].im, 22.0);
-    }
-
-    #[test]
-    fn test_f32_abs() {
-        let a = VectorSimd::from_vec(vec![-1.0f32, 2.0, -3.0, 4.0, -5.0]);
-        let b = a.abs();
-
-        assert_eq!(b[0], 1.0);
-        assert_eq!(b[1], 2.0);
-        assert_eq!(b[2], 3.0);
-        assert_eq!(b[3], 4.0);
-        assert_eq!(b[4], 5.0);
-    }
-
-    #[test]
-    fn test_f32_linspace() {
-        let v = VectorSimd::<f32>::linspace(0.0, 10.0, 11);
-
-        assert_eq!(v.len(), 11);
-        assert_eq!(v[0], 0.0);
-        assert_eq!(v[10], 10.0);
-        assert!((v[5] - 5.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn test_convolution() {
-        let signal = VectorSimd::from_vec((0..1024).map(|x| x as f32).collect::<Vec<_>>());
-        let kernel = VectorSimd::from_vec(vec![1.0f32, 0.0, 1.0]);
-
-        let result = signal.convolve(&kernel);
-
-        // First element should be signal[0] + signal[2] = 0 + 2 = 2
-        assert_eq!(result[0], 2.0);
-        // Second element should be signal[1] + signal[3] = 1 + 3 = 4
-        assert_eq!(result[1], 4.0);
-    }
-
-    // ========================================================================
-    // Benchmark Tests - Compare SIMD vs Scalar Performance
-    // ========================================================================
-
-    use std::time::Instant;
-
-    /// Helper function to run scalar addition (non-SIMD baseline)
-    /// This uses iterator chains which LLVM will auto-vectorize
-    fn scalar_add_f32(a: &[f32], b: &[f32]) -> Vec<f32> {
-        a.iter().zip(b.iter()).map(|(x, y)| x + y).collect()
-    }
-
-    /// Non-vectorizable scalar addition (forced to prevent LLVM auto-vectorization)
-    #[inline(never)]
-    fn scalar_add_f32_no_vec(a: &[f32], b: &[f32]) -> Vec<f32> {
-        let mut result = Vec::with_capacity(a.len());
-        for i in 0..a.len() {
-            // black_box prevents the compiler from optimizing this loop
-            result.push(std::hint::black_box(a[i] + b[i]));
-        }
-        result
-    }
-
-    /// Helper function to run scalar multiplication (non-SIMD baseline)
-    fn scalar_mul_f32(a: &[f32], b: &[f32]) -> Vec<f32> {
-        a.iter().zip(b.iter()).map(|(x, y)| x * y).collect()
-    }
-
-    /// Non-vectorizable scalar multiplication
-    #[inline(never)]
-    fn scalar_mul_f32_no_vec(a: &[f32], b: &[f32]) -> Vec<f32> {
-        let mut result = Vec::with_capacity(a.len());
-        for i in 0..a.len() {
-            result.push(std::hint::black_box(a[i] * b[i]));
-        }
-        result
-    }
-
-    /// Helper function to run scalar convolution (non-SIMD baseline)
-    fn scalar_convolve_f32(signal: &[f32], kernel: &[f32]) -> Vec<f32> {
-        let output_size = signal.len() - kernel.len() + 1;
-        let mut result = vec![0.0f32; output_size];
-
-        for i in 0..output_size {
-            let mut sum = 0.0f32;
-            for j in 0..kernel.len() {
-                sum += signal[i + j] * kernel[j];
-            }
-            result[i] = sum;
-        }
-        result
-    }
-
-    #[test]
-    fn benchmark_f32_addition() {
-        println!("\n=== Benchmark: f32 Addition ===");
-
-        for &size in &[10_000, 100_000] {
-            println!("\nVector size: {}", size);
-
-            let data_a: Vec<f32> = (0..size).map(|i| (i % 1000) as f32).collect();
-            let data_b: Vec<f32> = (0..size).map(|i| ((i * 7) % 1000) as f32).collect();
-
-            let vec_a = VectorSimd::from_vec(data_a.clone());
-            let vec_b = VectorSimd::from_vec(data_b.clone());
-
-            const ITERATIONS: usize = 10;
-
-            // Benchmark SIMD
-            let start = Instant::now();
-            let mut simd_result = VectorSimd::new();
-            for _ in 0..ITERATIONS {
-                simd_result = &vec_a + &vec_b;
-            }
-            let simd_time = start.elapsed() / ITERATIONS as u32;
-            std::hint::black_box(&simd_result); // Prevent optimization
-
-            // Benchmark Scalar
-            let start = Instant::now();
-            let mut scalar_result = Vec::new();
-            for _ in 0..ITERATIONS {
-                scalar_result = scalar_add_f32(&data_a, &data_b);
-            }
-            let scalar_time = start.elapsed() / ITERATIONS as u32;
-            std::hint::black_box(&scalar_result); // Prevent optimization
-
-            let speedup = scalar_time.as_nanos() as f64 / simd_time.as_nanos() as f64;
-
-            println!("  SIMD:   {:?}", simd_time);
-            println!("  Scalar: {:?}", scalar_time);
-            println!("  Speedup: {:.2}x", speedup);
+    fn selected_backend_matches_scalar_reference() {
+        for len in test_lengths() {
+            assert_backend_matches_reference::<SelectedBackend>(len);
         }
     }
 
     #[test]
-    fn benchmark_f32_multiplication() {
-        println!("\n=== Benchmark: f32 Multiplication ===");
-
-        for &size in &[10_000, 100_000] {
-            println!("\nVector size: {}", size);
-
-            let data_a: Vec<f32> = (0..size).map(|i| (i % 1000) as f32 / 1000.0).collect();
-            let data_b: Vec<f32> = (0..size).map(|i| ((i * 7) % 1000) as f32 / 1000.0).collect();
-
-            let vec_a = VectorSimd::from_vec(data_a.clone());
-            let vec_b = VectorSimd::from_vec(data_b.clone());
-
-            const ITERATIONS: usize = 10;
-
-            // Benchmark SIMD
-            let start = Instant::now();
-            let mut simd_result = VectorSimd::new();
-            for _ in 0..ITERATIONS {
-                simd_result = &vec_a * &vec_b;
-            }
-            let simd_time = start.elapsed() / ITERATIONS as u32;
-            std::hint::black_box(&simd_result);
-
-            // Benchmark Scalar
-            let start = Instant::now();
-            let mut scalar_result = Vec::new();
-            for _ in 0..ITERATIONS {
-                scalar_result = scalar_mul_f32(&data_a, &data_b);
-            }
-            let scalar_time = start.elapsed() / ITERATIONS as u32;
-            std::hint::black_box(&scalar_result);
-
-            let speedup = scalar_time.as_nanos() as f64 / simd_time.as_nanos() as f64;
-
-            println!("  SIMD:   {:?}", simd_time);
-            println!("  Scalar: {:?}", scalar_time);
-            println!("  Speedup: {:.2}x", speedup);
+    fn selected_backend_matches_scalar_reference_f64() {
+        for len in test_lengths_f64() {
+            assert_backend_matches_reference_f64::<SelectedBackend>(len);
         }
     }
 
     #[test]
-    fn benchmark_f32_scalar_multiply() {
-        println!("\n=== Benchmark: f32 Scalar Multiply (vec * scalar) ===");
-
-        for &size in &[10_000, 100_000] {
-            println!("\nVector size: {}", size);
-
-            let data: Vec<f32> = (0..size).map(|i| (i % 1000) as f32 / 1000.0).collect();
-            let vec = VectorSimd::from_vec(data.clone());
-            let scalar = 2.5f32;
-
-            const ITERATIONS: usize = 10;
-
-            // Benchmark SIMD
-            let start = Instant::now();
-            let mut simd_result = VectorSimd::new();
-            for _ in 0..ITERATIONS {
-                simd_result = &vec * scalar;
-            }
-            let simd_time = start.elapsed() / ITERATIONS as u32;
-            std::hint::black_box(&simd_result);
-
-            // Benchmark Scalar
-            let start = Instant::now();
-            let mut scalar_result = Vec::new();
-            for _ in 0..ITERATIONS {
-                scalar_result = data.iter().map(|&x| x * scalar).collect();
-            }
-            let scalar_time = start.elapsed() / ITERATIONS as u32;
-            std::hint::black_box(&scalar_result);
-
-            let speedup = scalar_time.as_nanos() as f64 / simd_time.as_nanos() as f64;
-
-            println!("  SIMD:   {:?}", simd_time);
-            println!("  Scalar: {:?}", scalar_time);
-            println!("  Speedup: {:.2}x", speedup);
+    fn scalar_backend_matches_reference() {
+        for len in test_lengths() {
+            assert_backend_matches_reference::<scalar::ScalarBackend>(len);
         }
     }
 
     #[test]
-    fn benchmark_f32_division() {
-        println!("\n=== Benchmark: f32 Division ===");
-
-        for &size in &[10_000, 100_000] {
-            println!("\nVector size: {}", size);
-
-            let data_a: Vec<f32> = (0..size).map(|i| (i % 1000) as f32 + 1.0).collect();
-            let data_b: Vec<f32> = (0..size).map(|i| ((i * 7) % 1000) as f32 + 1.0).collect();
-
-            let vec_a = VectorSimd::from_vec(data_a.clone());
-            let vec_b = VectorSimd::from_vec(data_b.clone());
-
-            const ITERATIONS: usize = 10;
-
-            // Benchmark SIMD
-            let start = Instant::now();
-            let mut simd_result = VectorSimd::new();
-            for _ in 0..ITERATIONS {
-                simd_result = &vec_a / &vec_b;
-            }
-            let simd_time = start.elapsed() / ITERATIONS as u32;
-            std::hint::black_box(&simd_result);
-
-            // Benchmark Scalar
-            let start = Instant::now();
-            let mut scalar_result = Vec::new();
-            for _ in 0..ITERATIONS {
-                scalar_result = data_a.iter().zip(data_b.iter()).map(|(x, y)| x / y).collect();
-            }
-            let scalar_time = start.elapsed() / ITERATIONS as u32;
-            std::hint::black_box(&scalar_result);
-
-            let speedup = scalar_time.as_nanos() as f64 / simd_time.as_nanos() as f64;
-
-            println!("  SIMD:   {:?}", simd_time);
-            println!("  Scalar: {:?}", scalar_time);
-            println!("  Speedup: {:.2}x", speedup);
+    fn scalar_backend_matches_reference_f64() {
+        for len in test_lengths_f64() {
+            assert_backend_matches_reference_f64::<scalar::ScalarBackend>(len);
         }
     }
 
     #[test]
-    fn benchmark_f32_abs() {
-        println!("\n=== Benchmark: f32 Absolute Value ===");
-
-        for &size in &[10_000, 100_000] {
-            println!("\nVector size: {}", size);
-
-            let data: Vec<f32> = (0..size).map(|i| if i % 2 == 0 { i as f32 } else { -(i as f32) }).collect();
-            let vec = VectorSimd::from_vec(data.clone());
-
-            const ITERATIONS: usize = 10;
-
-            // Benchmark SIMD
-            let start = Instant::now();
-            let mut simd_result = VectorSimd::new();
-            for _ in 0..ITERATIONS {
-                simd_result = vec.abs();
-            }
-            let simd_time = start.elapsed() / ITERATIONS as u32;
-            std::hint::black_box(&simd_result);
-
-            // Benchmark Scalar
-            let start = Instant::now();
-            let mut scalar_result = Vec::new();
-            for _ in 0..ITERATIONS {
-                scalar_result = data.iter().map(|&x| x.abs()).collect();
-            }
-            let scalar_time = start.elapsed() / ITERATIONS as u32;
-            std::hint::black_box(&scalar_result);
-
-            let speedup = scalar_time.as_nanos() as f64 / simd_time.as_nanos() as f64;
-
-            println!("  SIMD:   {:?}", simd_time);
-            println!("  Scalar: {:?}", scalar_time);
-            println!("  Speedup: {:.2}x", speedup);
-        }
+    fn selected_convolve_full_matches_scalar_reference() {
+        assert_convolve_full_cases_match_reference::<SelectedBackend>();
     }
 
     #[test]
-    fn benchmark_f32_convolution() {
-        println!("\n=== Benchmark: f32 Convolution ===");
-
-        for &size in &[10_000, 100_000] {
-            println!("\nSignal size: {}, Kernel size: 101", size);
-
-            let signal_data: Vec<f32> = (0..size).map(|i| (i % 1000) as f32 / 1000.0).collect();
-            let kernel_data: Vec<f32> = (0..101).map(|i| (i as f32 / 100.0).sin()).collect();
-
-            let signal = VectorSimd::from_vec(signal_data.clone());
-            let kernel = VectorSimd::from_vec(kernel_data.clone());
-
-            const ITERATIONS: usize = 10;
-
-            // Benchmark SIMD
-            let start = Instant::now();
-            let mut simd_result = VectorSimd::new();
-            for _ in 0..ITERATIONS {
-                simd_result = signal.convolve(&kernel);
-            }
-            let simd_time = start.elapsed() / ITERATIONS as u32;
-            std::hint::black_box(&simd_result);
-
-            // Benchmark Scalar
-            let start = Instant::now();
-            let mut scalar_result = Vec::new();
-            for _ in 0..ITERATIONS {
-                scalar_result = scalar_convolve_f32(&signal_data, &kernel_data);
-            }
-            let scalar_time = start.elapsed() / ITERATIONS as u32;
-            std::hint::black_box(&scalar_result);
-
-            let speedup = scalar_time.as_nanos() as f64 / simd_time.as_nanos() as f64;
-
-            println!("  SIMD:   {:?}", simd_time);
-            println!("  Scalar: {:?}", scalar_time);
-            println!("  Speedup: {:.2}x", speedup);
-        }
-    }
-
-    /// Non-vectorizable scalar complex multiplication
-    #[inline(never)]
-    fn scalar_complex_mul_no_vec(a: &[Complex<f32>], b: &[Complex<f32>]) -> Vec<Complex<f32>> {
-        let mut result = Vec::with_capacity(a.len());
-        for i in 0..a.len() {
-            result.push(std::hint::black_box(a[i] * b[i]));
-        }
-        result
-    }
-
-    /// Non-vectorizable scalar complex addition
-    #[inline(never)]
-    fn scalar_complex_add_no_vec(a: &[Complex<f32>], b: &[Complex<f32>]) -> Vec<Complex<f32>> {
-        let mut result = Vec::with_capacity(a.len());
-        for i in 0..a.len() {
-            result.push(std::hint::black_box(a[i] + b[i]));
-        }
-        result
+    fn selected_convolve_full_matches_scalar_reference_f64() {
+        assert_convolve_full_cases_match_reference_f64::<SelectedBackend>();
     }
 
     #[test]
-    fn benchmark_complex32_addition() {
-        println!("\n=== Benchmark: Complex32 Addition ===");
-
-        for &size in &[1_000_000] {
-            println!("\nVector size: {}", size);
-
-            let data_a: Vec<Complex<f32>> = (0..size)
-                .map(|i| Complex::new((i % 100) as f32 / 100.0, ((i * 3) % 100) as f32 / 100.0))
-                .collect();
-            let data_b: Vec<Complex<f32>> = (0..size)
-                .map(|i| Complex::new(((i * 7) % 100) as f32 / 100.0, ((i * 11) % 100) as f32 / 100.0))
-                .collect();
-
-            let vec_a = VectorSimd::from_vec(data_a.clone());
-            let vec_b = VectorSimd::from_vec(data_b.clone());
-
-            const ITERATIONS: usize = 10;
-
-            // Benchmark SIMD
-            let start = Instant::now();
-            let mut simd_result = VectorSimd::new();
-            for _ in 0..ITERATIONS {
-                simd_result = &vec_a + &vec_b;
-            }
-            let simd_time = start.elapsed() / ITERATIONS as u32;
-            std::hint::black_box(&simd_result);
-
-            // Benchmark Auto-vectorized Scalar
-            let start = Instant::now();
-            let mut auto_result = Vec::new();
-            for _ in 0..ITERATIONS {
-                auto_result = data_a.iter().zip(data_b.iter()).map(|(a, b)| a + b).collect();
-            }
-            let auto_time = start.elapsed() / ITERATIONS as u32;
-            std::hint::black_box(&auto_result);
-
-            // Benchmark Non-vectorized Scalar
-            let start = Instant::now();
-            let mut novec_result = Vec::new();
-            for _ in 0..ITERATIONS {
-                novec_result = scalar_complex_add_no_vec(&data_a, &data_b);
-            }
-            let novec_time = start.elapsed() / ITERATIONS as u32;
-            std::hint::black_box(&novec_result);
-
-            let speedup_auto = auto_time.as_nanos() as f64 / simd_time.as_nanos() as f64;
-            let speedup_novec = novec_time.as_nanos() as f64 / simd_time.as_nanos() as f64;
-
-            println!("  SIMD:             {:?}", simd_time);
-            println!("  Scalar (auto-vec): {:?}", auto_time);
-            println!("  Scalar (no-vec):   {:?}", novec_time);
-            println!("  SIMD vs Auto-vec:  {:.2}x", speedup_auto);
-            println!("  SIMD vs No-vec:    {:.2}x", speedup_novec);
-        }
+    fn scalar_convolve_full_matches_scalar_reference() {
+        assert_convolve_full_cases_match_reference::<scalar::ScalarBackend>();
     }
 
     #[test]
-    fn benchmark_complex32_multiplication() {
-        println!("\n=== Benchmark: Complex32 Multiplication ===");
+    fn scalar_convolve_full_matches_scalar_reference_f64() {
+        assert_convolve_full_cases_match_reference_f64::<scalar::ScalarBackend>();
+    }
 
-        for &size in &[1_000_000] {
-            println!("\nVector size: {}", size);
-
-            let data_a: Vec<Complex<f32>> = (0..size)
-                .map(|i| Complex::new((i % 100) as f32 / 100.0, ((i * 3) % 100) as f32 / 100.0))
-                .collect();
-            let data_b: Vec<Complex<f32>> = (0..size)
-                .map(|i| Complex::new(((i * 7) % 100) as f32 / 100.0, ((i * 11) % 100) as f32 / 100.0))
-                .collect();
-
-            let vec_a = VectorSimd::from_vec(data_a.clone());
-            let vec_b = VectorSimd::from_vec(data_b.clone());
-
-            const ITERATIONS: usize = 10;
-
-            // Benchmark SIMD
-            let start = Instant::now();
-            let mut simd_result = VectorSimd::new();
-            for _ in 0..ITERATIONS {
-                simd_result = &vec_a * &vec_b;
-            }
-            let simd_time = start.elapsed() / ITERATIONS as u32;
-            std::hint::black_box(&simd_result);
-
-            // Benchmark Auto-vectorized Scalar
-            let start = Instant::now();
-            let mut auto_result = Vec::new();
-            for _ in 0..ITERATIONS {
-                auto_result = data_a.iter().zip(data_b.iter()).map(|(a, b)| a * b).collect();
-            }
-            let auto_time = start.elapsed() / ITERATIONS as u32;
-            std::hint::black_box(&auto_result);
-
-            // Benchmark Non-vectorized Scalar
-            let start = Instant::now();
-            let mut novec_result = Vec::new();
-            for _ in 0..ITERATIONS {
-                novec_result = scalar_complex_mul_no_vec(&data_a, &data_b);
-            }
-            let novec_time = start.elapsed() / ITERATIONS as u32;
-            std::hint::black_box(&novec_result);
-
-            let speedup_auto = auto_time.as_nanos() as f64 / simd_time.as_nanos() as f64;
-            let speedup_novec = novec_time.as_nanos() as f64 / simd_time.as_nanos() as f64;
-
-            println!("  SIMD:             {:?}", simd_time);
-            println!("  Scalar (auto-vec): {:?}", auto_time);
-            println!("  Scalar (no-vec):   {:?}", novec_time);
-            println!("  SIMD vs Auto-vec:  {:.2}x", speedup_auto);
-            println!("  SIMD vs No-vec:    {:.2}x", speedup_novec);
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[test]
+    fn available_x86_backends_match_reference() {
+        for len in test_lengths() {
+            assert_backend_matches_reference::<x86::Sse2Backend>(len);
+            assert_avx2_backend_matches_reference(len);
+            assert_avx512_backend_matches_reference(len);
+        }
+        for len in test_lengths_f64() {
+            assert_backend_matches_reference_f64::<x86::Sse2Backend>(len);
+            assert_avx2_backend_matches_reference_f64(len);
+            assert_avx512_backend_matches_reference_f64(len);
         }
     }
 
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     #[test]
-    fn benchmark_complex32_division() {
-        println!("\n=== Benchmark: Complex32 Division ===");
-
-        for &size in &[1_000_000] {
-            println!("\nVector size: {}", size);
-
-            let data_a: Vec<Complex<f32>> = (0..size)
-                .map(|i| Complex::new((i % 100) as f32 / 100.0 + 1.0, ((i * 3) % 100) as f32 / 100.0 + 1.0))
-                .collect();
-            let data_b: Vec<Complex<f32>> = (0..size)
-                .map(|i| Complex::new(((i * 7) % 100) as f32 / 100.0 + 1.0, ((i * 11) % 100) as f32 / 100.0 + 1.0))
-                .collect();
-
-            let vec_a = VectorSimd::from_vec(data_a.clone());
-            let vec_b = VectorSimd::from_vec(data_b.clone());
-
-            const ITERATIONS: usize = 10;
-
-            // Benchmark SIMD
-            let start = Instant::now();
-            let mut simd_result = VectorSimd::new();
-            for _ in 0..ITERATIONS {
-                simd_result = &vec_a / &vec_b;
-            }
-            let simd_time = start.elapsed() / ITERATIONS as u32;
-            std::hint::black_box(&simd_result);
-
-            // Benchmark Scalar
-            let start = Instant::now();
-            let mut scalar_result = Vec::new();
-            for _ in 0..ITERATIONS {
-                scalar_result = data_a.iter().zip(data_b.iter()).map(|(a, b)| a / b).collect();
-            }
-            let scalar_time = start.elapsed() / ITERATIONS as u32;
-            std::hint::black_box(&scalar_result);
-
-            let speedup = scalar_time.as_nanos() as f64 / simd_time.as_nanos() as f64;
-
-            println!("  SIMD:   {:?}", simd_time);
-            println!("  Scalar: {:?}", scalar_time);
-            println!("  Speedup: {:.2}x", speedup);
-        }
+    fn available_x86_convolve_backends_match_reference() {
+        assert_convolve_full_cases_match_reference::<x86::Sse2Backend>();
+        assert_avx2_convolve_backend_matches_reference();
+        assert_avx512_convolve_backend_matches_reference();
+        assert_convolve_full_cases_match_reference_f64::<x86::Sse2Backend>();
+        assert_avx2_convolve_backend_matches_reference_f64();
+        assert_avx512_convolve_backend_matches_reference_f64();
     }
 
     #[test]
-    fn benchmark_complex32_convolution() {
-        println!("\n=== Benchmark: Complex32 Convolution ===");
-
-        for &size in &[1_000_000] {
-            println!("\nSignal size: {}, Kernel size: 101", size);
-
-            let signal_data: Vec<Complex<f32>> = (0..size)
-                .map(|i| Complex::new((i % 1000) as f32 / 1000.0, ((i * 3) % 1000) as f32 / 1000.0))
-                .collect();
-            let kernel_data: Vec<Complex<f32>> = (0..101)
-                .map(|i| Complex::new((i as f32 / 100.0).sin(), (i as f32 / 100.0).cos()))
-                .collect();
-
-            let signal = VectorSimd::from_vec(signal_data.clone());
-            let kernel = VectorSimd::from_vec(kernel_data.clone());
-
-            const ITERATIONS: usize = 10;
-
-            // Benchmark SIMD
-            let start = Instant::now();
-            let mut simd_result = VectorSimd::new();
-            for _ in 0..ITERATIONS {
-                simd_result = signal.convolve(&kernel);
-            }
-            let simd_time = start.elapsed() / ITERATIONS as u32;
-            std::hint::black_box(&simd_result);
-
-            // Benchmark Scalar
-            let start = Instant::now();
-            let mut scalar_result = Vec::new();
-            for _ in 0..ITERATIONS {
-                let output_size = signal_data.len() - kernel_data.len() + 1;
-                let mut result = vec![Complex::new(0.0, 0.0); output_size];
-                for i in 0..output_size {
-                    let mut sum = Complex::new(0.0, 0.0);
-                    for j in 0..kernel_data.len() {
-                        sum += signal_data[i + j] * kernel_data[j];
-                    }
-                    result[i] = sum;
-                }
-                scalar_result = result;
-            }
-            let scalar_time = start.elapsed() / ITERATIONS as u32;
-            std::hint::black_box(&scalar_result);
-
-            let speedup = scalar_time.as_nanos() as f64 / simd_time.as_nanos() as f64;
-
-            println!("  SIMD:   {:?}", simd_time);
-            println!("  Scalar: {:?}", scalar_time);
-            println!("  Speedup: {:.2}x", speedup);
-        }
+    fn convolve_range_matches_full_slice() {
+        let input = make_iq(17, 0.11);
+        let kernel = make_iq(5, -0.19);
+        let mut full_output = zero_iq(input.len() + kernel.len() - 1);
+        let mut range_output = zero_iq(7);
+        iq_convolve_full_to(&input, &kernel, &mut full_output);
+        iq_convolve_range_to(&input, &kernel, 3, &mut range_output);
+        assert_complex_slices_close(&range_output, &full_output[3..10], EPSILON);
     }
 
     #[test]
-    fn benchmark_detailed_comparison() {
-        println!("\n=== Detailed Performance Analysis ===");
-        println!("\nComparing SIMD vs Auto-Vectorized Scalar vs Non-Vectorized Scalar");
-        println!("Vector size: 100,000 elements\n");
-
-        const SIZE: usize = 1_000_000;
-        const ITERATIONS: usize = 10;
-
-        let data_a: Vec<f32> = (0..SIZE).map(|i| (i % 1000) as f32 / 1000.0).collect();
-        let data_b: Vec<f32> = (0..SIZE).map(|i| ((i * 7) % 1000) as f32 / 1000.0).collect();
-        let vec_a = VectorSimd::from_vec(data_a.clone());
-        let vec_b = VectorSimd::from_vec(data_b.clone());
-
-        // === ADDITION ===
-        println!("Addition (+):");
-
-        // SIMD
-        let start = Instant::now();
-        let mut simd_result = VectorSimd::new();
-        for _ in 0..ITERATIONS {
-            simd_result = &vec_a + &vec_b;
-        }
-        let simd_time = start.elapsed() / ITERATIONS as u32;
-        std::hint::black_box(&simd_result);
-
-        // Auto-vectorized scalar
-        let start = Instant::now();
-        let mut auto_result = Vec::new();
-        for _ in 0..ITERATIONS {
-            auto_result = scalar_add_f32(&data_a, &data_b);
-        }
-        let auto_time = start.elapsed() / ITERATIONS as u32;
-        std::hint::black_box(&auto_result);
-
-        // Non-vectorized scalar
-        let start = Instant::now();
-        let mut novec_result = Vec::new();
-        for _ in 0..ITERATIONS {
-            novec_result = scalar_add_f32_no_vec(&data_a, &data_b);
-        }
-        let novec_time = start.elapsed() / ITERATIONS as u32;
-        std::hint::black_box(&novec_result);
-
-        println!("  SIMD (explicit):        {:?}", simd_time);
-        println!("  Scalar (auto-vec):      {:?}", auto_time);
-        println!("  Scalar (no-vec):        {:?}", novec_time);
-        println!("  SIMD vs Auto-vec:       {:.2}x", auto_time.as_nanos() as f64 / simd_time.as_nanos() as f64);
-        println!("  SIMD vs No-vec:         {:.2}x", novec_time.as_nanos() as f64 / simd_time.as_nanos() as f64);
-
-        // === MULTIPLICATION ===
-        println!("\nMultiplication (*):");
-
-        let start = Instant::now();
-        let mut simd_result = VectorSimd::new();
-        for _ in 0..ITERATIONS {
-            simd_result = &vec_a * &vec_b;
-        }
-        let simd_time = start.elapsed() / ITERATIONS as u32;
-        std::hint::black_box(&simd_result);
-
-        let start = Instant::now();
-        let mut auto_result = Vec::new();
-        for _ in 0..ITERATIONS {
-            auto_result = scalar_mul_f32(&data_a, &data_b);
-        }
-        let auto_time = start.elapsed() / ITERATIONS as u32;
-        std::hint::black_box(&auto_result);
-
-        let start = Instant::now();
-        let mut novec_result = Vec::new();
-        for _ in 0..ITERATIONS {
-            novec_result = scalar_mul_f32_no_vec(&data_a, &data_b);
-        }
-        let novec_time = start.elapsed() / ITERATIONS as u32;
-        std::hint::black_box(&novec_result);
-
-        println!("  SIMD (explicit):        {:?}", simd_time);
-        println!("  Scalar (auto-vec):      {:?}", auto_time);
-        println!("  Scalar (no-vec):        {:?}", novec_time);
-        println!("  SIMD vs Auto-vec:       {:.2}x", auto_time.as_nanos() as f64 / simd_time.as_nanos() as f64);
-        println!("  SIMD vs No-vec:         {:.2}x", novec_time.as_nanos() as f64 / simd_time.as_nanos() as f64);
-
-        println!("\n════════════════════════════════════════════════");
-        println!("Key Insight:");
-        println!("If SIMD beats auto-vec but loses to no-vec, the issue is memory allocation.");
-        println!("If SIMD beats no-vec significantly, explicit SIMD is working correctly!");
-        println!("════════════════════════════════════════════════\n");
+    fn convolve_range_matches_full_slice_f64() {
+        let input = make_iq_f64(17, 0.11);
+        let kernel = make_iq_f64(5, -0.19);
+        let mut full_output = zero_iq_f64(input.len() + kernel.len() - 1);
+        let mut range_output = zero_iq_f64(7);
+        iq_convolve_full_to(&input, &kernel, &mut full_output);
+        iq_convolve_range_to(&input, &kernel, 3, &mut range_output);
+        assert_complex_slices_close_f64(&range_output, &full_output[3..10], EPSILON_F64);
     }
 
     #[test]
-    fn benchmark_summary() {
-        println!("\n");
-        println!("╔════════════════════════════════════════════════════════════════╗");
-        println!("║           SIMD Performance Benchmark Summary                   ║");
-        println!("╠════════════════════════════════════════════════════════════════╣");
-        println!("║ Configuration: 128-bit registers (f32x4, f64x2)                ║");
-        println!("║                                                                 ║");
-        println!("║ Performance vs Non-Vectorized Baseline:                        ║");
-        println!("║   - f32 operations: 2.6x - 5.5x (explicit SIMD)                ║");
-        println!("║   - f64 operations: ~2x (explicit SIMD)                        ║");
-        println!("║   - Complex32:      1.3x - 2.4x (auto-vectorization)           ║");
-        println!("║                                                                 ║");
-        println!("║ Key Insights:                                                  ║");
-        println!("║   - Explicit SIMD wins for f32/f64 arithmetic                  ║");
-        println!("║   - Complex ops benefit more from allocation optimization      ║");
-        println!("║   - LLVM auto-vectorization is excellent for simple ops        ║");
-        println!("║   - Memory allocation matters more than SIMD instructions      ║");
-        println!("║                                                                 ║");
-        println!("║ To use 256-bit registers:                                      ║");
-        println!("║   Change simd_config::F32Batch from f32x4 → f32x8             ║");
-        println!("║   Expected speedup: ~6-8x for f32 operations                   ║");
-        println!("╚════════════════════════════════════════════════════════════════╝");
-        println!();
+    #[should_panic(expected = "input must not be empty")]
+    fn convolve_full_panics_on_empty_input() {
+        let kernel = make_iq(1, 0.0);
+        iq_convolve_full_to(&[], &kernel, &mut []);
+    }
+
+    #[test]
+    #[should_panic(expected = "kernel must not be empty")]
+    fn convolve_full_panics_on_empty_kernel() {
+        let input = make_iq(1, 0.0);
+        iq_convolve_full_to(&input, &[], &mut []);
+    }
+
+    #[test]
+    #[should_panic(expected = "full convolution output length must equal input.len() + kernel.len() - 1")]
+    fn convolve_full_panics_on_bad_output_length() {
+        let input = make_iq(4, 0.0);
+        let kernel = make_iq(3, 0.0);
+        let mut output = zero_iq(5);
+        iq_convolve_full_to(&input, &kernel, &mut output);
+    }
+
+    #[test]
+    fn frequency_shifter_keeps_phase_across_blocks() {
+        let input = make_iq(97, 0.11);
+        let mut whole = input.clone();
+        let mut chunked = input.clone();
+        FrequencyShifter::new(12_500.0, 1_000_000.0).process_block(&mut whole);
+        shift_in_chunks(&mut chunked);
+        assert_complex_slices_close(&whole, &chunked, EPSILON);
+    }
+
+    #[test]
+    fn frequency_shifter_keeps_phase_across_blocks_f64() {
+        let input = make_iq_f64(97, 0.11);
+        let mut whole = input.clone();
+        let mut chunked = input.clone();
+        FrequencyShifter::new(12_500.0_f64, 1_000_000.0_f64).process_block(&mut whole);
+        shift_in_chunks_f64(&mut chunked);
+        assert_complex_slices_close_f64(&whole, &chunked, EPSILON_F64);
+    }
+
+    #[test]
+    fn fir_filter_keeps_delay_across_blocks() {
+        let input = make_iq(89, 0.07);
+        let taps = make_iq(7, -0.13);
+        let mut whole_output = vec![Complex::new(0.0, 0.0); input.len()];
+        let mut chunked_output = vec![Complex::new(0.0, 0.0); input.len()];
+        FirFilter::new(taps.clone()).process_block_to(&input, &mut whole_output);
+        fir_in_chunks(&input, &mut chunked_output, taps);
+        assert_complex_slices_close(&whole_output, &chunked_output, EPSILON);
+    }
+
+    #[test]
+    fn fir_filter_keeps_delay_across_blocks_f64() {
+        let input = make_iq_f64(89, 0.07);
+        let taps = make_iq_f64(7, -0.13);
+        let mut whole_output = vec![Complex::new(0.0, 0.0); input.len()];
+        let mut chunked_output = vec![Complex::new(0.0, 0.0); input.len()];
+        FirFilter::new(taps.clone()).process_block_to(&input, &mut whole_output);
+        fir_in_chunks_f64(&input, &mut chunked_output, taps);
+        assert_complex_slices_close_f64(&whole_output, &chunked_output, EPSILON_F64);
+    }
+
+    #[test]
+    fn fir_filter_block_matches_sample_reference() {
+        let input = make_iq(73, -0.03);
+        let taps = make_iq(9, 0.17);
+        let mut block_output = zero_iq(input.len());
+        let mut sample_output = zero_iq(input.len());
+        FirFilter::new(taps.clone()).process_block_to(&input, &mut block_output);
+        write_fir_sample_reference(&input, &mut sample_output, taps);
+        assert_complex_slices_close(&block_output, &sample_output, EPSILON);
+    }
+
+    #[test]
+    fn fir_filter_block_matches_sample_reference_f64() {
+        let input = make_iq_f64(73, -0.03);
+        let taps = make_iq_f64(9, 0.17);
+        let mut block_output = zero_iq_f64(input.len());
+        let mut sample_output = zero_iq_f64(input.len());
+        FirFilter::new(taps.clone()).process_block_to(&input, &mut block_output);
+        write_fir_sample_reference_f64(&input, &mut sample_output, taps);
+        assert_complex_slices_close_f64(&block_output, &sample_output, EPSILON_F64);
+    }
+
+    #[test]
+    fn fir_in_place_matches_output_mode() {
+        let input = make_iq(67, 0.05);
+        let taps = make_iq(5, 0.17);
+        let mut output_mode = vec![Complex::new(0.0, 0.0); input.len()];
+        let mut in_place_mode = input.clone();
+        FirFilter::new(taps.clone()).process_block_to(&input, &mut output_mode);
+        FirFilter::new(taps).process_block_in_place(&mut in_place_mode);
+        assert_complex_slices_close(&output_mode, &in_place_mode, EPSILON);
+    }
+
+    #[test]
+    fn fir_in_place_matches_output_mode_f64() {
+        let input = make_iq_f64(67, 0.05);
+        let taps = make_iq_f64(5, 0.17);
+        let mut output_mode = vec![Complex::new(0.0, 0.0); input.len()];
+        let mut in_place_mode = input.clone();
+        FirFilter::new(taps.clone()).process_block_to(&input, &mut output_mode);
+        FirFilter::new(taps).process_block_in_place(&mut in_place_mode);
+        assert_complex_slices_close_f64(&output_mode, &in_place_mode, EPSILON_F64);
+    }
+
+    /// Checks one backend against scalar reference operations for a block length.
+    fn assert_backend_matches_reference<B: IqBackend>(len: usize) {
+        assert_add_to_matches::<B>(len);
+        assert_add_in_place_matches::<B>(len);
+        assert_scale_in_place_matches::<B>(len);
+        assert_add_scaled_in_place_matches::<B>(len);
+        assert_multiply_to_matches::<B>(len);
+        assert_conjugate_multiply_to_matches::<B>(len);
+        assert_conjugate_multiply_sum_matches::<B>(len);
+        assert_sum_squared_magnitudes_matches::<B>(len);
+        assert_calculate_magnitudes_matches::<B>(len);
+    }
+
+    /// Checks one f64 backend against scalar reference operations for a length.
+    fn assert_backend_matches_reference_f64<B: IqBackendF64>(len: usize) {
+        assert_add_to_matches_f64::<B>(len);
+        assert_add_in_place_matches_f64::<B>(len);
+        assert_scale_in_place_matches_f64::<B>(len);
+        assert_add_scaled_in_place_matches_f64::<B>(len);
+        assert_multiply_to_matches_f64::<B>(len);
+        assert_conjugate_multiply_to_matches_f64::<B>(len);
+        assert_conjugate_multiply_sum_matches_f64::<B>(len);
+        assert_sum_squared_magnitudes_matches_f64::<B>(len);
+        assert_calculate_magnitudes_matches_f64::<B>(len);
+    }
+
+    /// Checks backend add-to output for a block length.
+    fn assert_add_to_matches<B: IqBackend>(len: usize) {
+        let left = make_iq(len, 0.13);
+        let right = make_iq(len, -0.21);
+        let mut actual = zero_iq(len);
+        let mut expected = zero_iq(len);
+        B::iq_add_to(&left, &right, &mut actual);
+        scalar::iq_add_to(&left, &right, &mut expected);
+        assert_complex_slices_close(&actual, &expected, EPSILON);
+    }
+
+    /// Checks backend in-place add output for a block length.
+    fn assert_add_in_place_matches<B: IqBackend>(len: usize) {
+        let mut actual = make_iq(len, 0.13);
+        let mut expected = actual.clone();
+        let input = make_iq(len, -0.21);
+        B::iq_add_in_place(&mut actual, &input);
+        scalar::iq_add_in_place(&mut expected, &input);
+        assert_complex_slices_close(&actual, &expected, EPSILON);
+    }
+
+    /// Checks backend in-place scale output for a block length.
+    fn assert_scale_in_place_matches<B: IqBackend>(len: usize) {
+        let mut actual = make_iq(len, 0.13);
+        let mut expected = actual.clone();
+        B::iq_scale_in_place(&mut actual, -1.75);
+        scalar::iq_scale_in_place(&mut expected, -1.75);
+        assert_complex_slices_close(&actual, &expected, EPSILON);
+    }
+
+    /// Checks backend add-scaled output for a block length.
+    fn assert_add_scaled_in_place_matches<B: IqBackend>(len: usize) {
+        let mut actual = make_iq(len, 0.13);
+        let mut expected = actual.clone();
+        let input = make_iq(len, -0.21);
+        let scale = Complex::new(0.75, -0.25);
+        B::iq_add_scaled_in_place(&mut actual, scale, &input);
+        scalar::iq_add_scaled_in_place(&mut expected, scale, &input);
+        assert_complex_slices_close(&actual, &expected, EPSILON);
+    }
+
+    /// Checks backend multiply output for a block length.
+    fn assert_multiply_to_matches<B: IqBackend>(len: usize) {
+        let left = make_iq(len, 0.13);
+        let right = make_iq(len, -0.21);
+        let mut actual = zero_iq(len);
+        let mut expected = zero_iq(len);
+        B::iq_multiply_to(&left, &right, &mut actual);
+        scalar::iq_multiply_to(&left, &right, &mut expected);
+        assert_complex_slices_close(&actual, &expected, EPSILON);
+    }
+
+    /// Checks backend conjugate-multiply output for a block length.
+    fn assert_conjugate_multiply_to_matches<B: IqBackend>(len: usize) {
+        let left = make_iq(len, 0.13);
+        let right = make_iq(len, -0.21);
+        let mut actual = zero_iq(len);
+        let mut expected = zero_iq(len);
+        B::iq_conjugate_multiply_to(&left, &right, &mut actual);
+        scalar::iq_conjugate_multiply_to(&left, &right, &mut expected);
+        assert_complex_slices_close(&actual, &expected, EPSILON);
+    }
+
+    /// Checks backend conjugate-multiply sum output for a block length.
+    fn assert_conjugate_multiply_sum_matches<B: IqBackend>(len: usize) {
+        let left = make_iq(len, 0.13);
+        let right = make_iq(len, -0.21);
+        let actual = B::iq_conjugate_multiply_sum(&left, &right);
+        let expected = scalar::iq_conjugate_multiply_sum(&left, &right);
+        assert_complex_close(actual, expected, 2.0e-3);
+    }
+
+    /// Checks backend sum of squared magnitudes output for a block length.
+    fn assert_sum_squared_magnitudes_matches<B: IqBackend>(len: usize) {
+        let input = make_iq(len, 0.13);
+        let actual = B::iq_sum_squared_magnitudes(&input);
+        let expected = scalar::iq_sum_squared_magnitudes(&input);
+        assert_close(actual, expected, 2.0e-3);
+    }
+
+    /// Checks backend magnitude output for a block length.
+    fn assert_calculate_magnitudes_matches<B: IqBackend>(len: usize) {
+        let input = make_iq(len, 0.13);
+        let mut actual = vec![0.0; len];
+        let mut expected = vec![0.0; len];
+        B::iq_calculate_magnitudes_to(&input, &mut actual);
+        scalar::iq_calculate_magnitudes_to(&input, &mut expected);
+        assert_slices_close(&actual, &expected, EPSILON);
+    }
+
+    /// Checks f64 backend add-to output for a block length.
+    fn assert_add_to_matches_f64<B: IqBackendF64>(len: usize) {
+        let left = make_iq_f64(len, 0.13);
+        let right = make_iq_f64(len, -0.21);
+        let mut actual = zero_iq_f64(len);
+        let mut expected = zero_iq_f64(len);
+        B::iq_add_to(&left, &right, &mut actual);
+        scalar::iq_add_to_f64(&left, &right, &mut expected);
+        assert_complex_slices_close_f64(&actual, &expected, EPSILON_F64);
+    }
+
+    /// Checks f64 backend in-place add output for a block length.
+    fn assert_add_in_place_matches_f64<B: IqBackendF64>(len: usize) {
+        let mut actual = make_iq_f64(len, 0.13);
+        let mut expected = actual.clone();
+        let input = make_iq_f64(len, -0.21);
+        B::iq_add_in_place(&mut actual, &input);
+        scalar::iq_add_in_place_f64(&mut expected, &input);
+        assert_complex_slices_close_f64(&actual, &expected, EPSILON_F64);
+    }
+
+    /// Checks f64 backend in-place scale output for a block length.
+    fn assert_scale_in_place_matches_f64<B: IqBackendF64>(len: usize) {
+        let mut actual = make_iq_f64(len, 0.13);
+        let mut expected = actual.clone();
+        B::iq_scale_in_place(&mut actual, -1.75);
+        scalar::iq_scale_in_place_f64(&mut expected, -1.75);
+        assert_complex_slices_close_f64(&actual, &expected, EPSILON_F64);
+    }
+
+    /// Checks f64 backend add-scaled output for a block length.
+    fn assert_add_scaled_in_place_matches_f64<B: IqBackendF64>(len: usize) {
+        let mut actual = make_iq_f64(len, 0.13);
+        let mut expected = actual.clone();
+        let input = make_iq_f64(len, -0.21);
+        let scale = Complex::new(0.75, -0.25);
+        B::iq_add_scaled_in_place(&mut actual, scale, &input);
+        scalar::iq_add_scaled_in_place_f64(&mut expected, scale, &input);
+        assert_complex_slices_close_f64(&actual, &expected, EPSILON_F64);
+    }
+
+    /// Checks f64 backend multiply output for a block length.
+    fn assert_multiply_to_matches_f64<B: IqBackendF64>(len: usize) {
+        let left = make_iq_f64(len, 0.13);
+        let right = make_iq_f64(len, -0.21);
+        let mut actual = zero_iq_f64(len);
+        let mut expected = zero_iq_f64(len);
+        B::iq_multiply_to(&left, &right, &mut actual);
+        scalar::iq_multiply_to_f64(&left, &right, &mut expected);
+        assert_complex_slices_close_f64(&actual, &expected, EPSILON_F64);
+    }
+
+    /// Checks f64 backend conjugate-multiply output for a block length.
+    fn assert_conjugate_multiply_to_matches_f64<B: IqBackendF64>(len: usize) {
+        let left = make_iq_f64(len, 0.13);
+        let right = make_iq_f64(len, -0.21);
+        let mut actual = zero_iq_f64(len);
+        let mut expected = zero_iq_f64(len);
+        B::iq_conjugate_multiply_to(&left, &right, &mut actual);
+        scalar::iq_conjugate_multiply_to_f64(&left, &right, &mut expected);
+        assert_complex_slices_close_f64(&actual, &expected, EPSILON_F64);
+    }
+
+    /// Checks f64 backend conjugate-multiply sum output for a block length.
+    fn assert_conjugate_multiply_sum_matches_f64<B: IqBackendF64>(len: usize) {
+        let left = make_iq_f64(len, 0.13);
+        let right = make_iq_f64(len, -0.21);
+        let actual = B::iq_conjugate_multiply_sum(&left, &right);
+        let expected = scalar::iq_conjugate_multiply_sum_f64(&left, &right);
+        assert_complex_close_f64(actual, expected, 1.0e-9);
+    }
+
+    /// Checks f64 backend sum of squared magnitudes output for a block length.
+    fn assert_sum_squared_magnitudes_matches_f64<B: IqBackendF64>(len: usize) {
+        let input = make_iq_f64(len, 0.13);
+        let actual = B::iq_sum_squared_magnitudes(&input);
+        let expected = scalar::iq_sum_squared_magnitudes_f64(&input);
+        assert_close_f64(actual, expected, 1.0e-9);
+    }
+
+    /// Checks f64 backend magnitude output for a block length.
+    fn assert_calculate_magnitudes_matches_f64<B: IqBackendF64>(len: usize) {
+        let input = make_iq_f64(len, 0.13);
+        let mut actual = vec![0.0; len];
+        let mut expected = vec![0.0; len];
+        B::iq_calculate_magnitudes_to(&input, &mut actual);
+        scalar::iq_calculate_magnitudes_to_f64(&input, &mut expected);
+        assert_slices_close_f64(&actual, &expected, EPSILON_F64);
+    }
+
+    /// Checks convolution output against scalar reference cases.
+    fn assert_convolve_full_cases_match_reference<B: IqBackend>() {
+        for input_len in convolution_input_lengths() {
+            for kernel_len in convolution_kernel_lengths() {
+                assert_convolve_full_matches::<B>(input_len, kernel_len);
+            }
+        }
+    }
+
+    /// Checks f64 convolution output against scalar reference cases.
+    fn assert_convolve_full_cases_match_reference_f64<B: IqBackendF64>() {
+        for input_len in convolution_input_lengths_f64() {
+            for kernel_len in convolution_kernel_lengths() {
+                assert_convolve_full_matches_f64::<B>(input_len, kernel_len);
+            }
+        }
+    }
+
+    /// Checks full convolution output for one input and kernel length.
+    fn assert_convolve_full_matches<B: IqBackend>(input_len: usize, kernel_len: usize) {
+        let input = make_iq(input_len, 0.13);
+        let kernel = make_iq(kernel_len, -0.21);
+        let mut actual = zero_iq(input_len + kernel_len - 1);
+        let mut expected = zero_iq(input_len + kernel_len - 1);
+        B::iq_convolve_range_to(&input, &kernel, 0, &mut actual);
+        scalar::iq_convolve_range_to(&input, &kernel, 0, &mut expected);
+        assert_complex_slices_close(&actual, &expected, EPSILON);
+    }
+
+    /// Checks f64 full convolution output for one input and kernel length.
+    fn assert_convolve_full_matches_f64<B: IqBackendF64>(input_len: usize, kernel_len: usize) {
+        let input = make_iq_f64(input_len, 0.13);
+        let kernel = make_iq_f64(kernel_len, -0.21);
+        let mut actual = zero_iq_f64(input_len + kernel_len - 1);
+        let mut expected = zero_iq_f64(input_len + kernel_len - 1);
+        B::iq_convolve_range_to(&input, &kernel, 0, &mut actual);
+        scalar::iq_convolve_range_to_f64(&input, &kernel, 0, &mut expected);
+        assert_complex_slices_close_f64(&actual, &expected, EPSILON_F64);
+    }
+
+    /// Runs AVX2 backend checks when the current test CPU supports it.
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    fn assert_avx2_backend_matches_reference(len: usize) {
+        if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") {
+            assert_backend_matches_reference::<x86::Avx2Backend>(len);
+        }
+    }
+
+    /// Runs AVX-512 backend checks when the current test CPU supports it.
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    fn assert_avx512_backend_matches_reference(len: usize) {
+        if std::is_x86_feature_detected!("avx512f") {
+            assert_backend_matches_reference::<x86::Avx512Backend>(len);
+        }
+    }
+
+    /// Runs AVX2 f64 backend checks when the current test CPU supports it.
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    fn assert_avx2_backend_matches_reference_f64(len: usize) {
+        if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") {
+            assert_backend_matches_reference_f64::<x86::Avx2Backend>(len);
+        }
+    }
+
+    /// Runs AVX-512 f64 backend checks when the current test CPU supports it.
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    fn assert_avx512_backend_matches_reference_f64(len: usize) {
+        if std::is_x86_feature_detected!("avx512f") {
+            assert_backend_matches_reference_f64::<x86::Avx512Backend>(len);
+        }
+    }
+
+    /// Runs AVX2 convolution checks when the current test CPU supports it.
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    fn assert_avx2_convolve_backend_matches_reference() {
+        if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") {
+            assert_convolve_full_cases_match_reference::<x86::Avx2Backend>();
+        }
+    }
+
+    /// Runs AVX-512 convolution checks when the current test CPU supports it.
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    fn assert_avx512_convolve_backend_matches_reference() {
+        if std::is_x86_feature_detected!("avx512f") {
+            assert_convolve_full_cases_match_reference::<x86::Avx512Backend>();
+        }
+    }
+
+    /// Runs AVX2 f64 convolution checks when the current test CPU supports it.
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    fn assert_avx2_convolve_backend_matches_reference_f64() {
+        if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") {
+            assert_convolve_full_cases_match_reference_f64::<x86::Avx2Backend>();
+        }
+    }
+
+    /// Runs AVX-512 f64 convolution checks when the current test CPU supports it.
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    fn assert_avx512_convolve_backend_matches_reference_f64() {
+        if std::is_x86_feature_detected!("avx512f") {
+            assert_convolve_full_cases_match_reference_f64::<x86::Avx512Backend>();
+        }
+    }
+
+    /// Returns block lengths around and across the selected lane width.
+    fn test_lengths() -> Vec<usize> {
+        vec![0, 1, IQ_LANES.saturating_sub(1), IQ_LANES, IQ_LANES + 1, IQ_LANES * 3 + 2, 31]
+    }
+
+    /// Returns block lengths around and across the selected f64 lane width.
+    fn test_lengths_f64() -> Vec<usize> {
+        vec![
+            0,
+            1,
+            IQ_LANES_F64.saturating_sub(1),
+            IQ_LANES_F64,
+            IQ_LANES_F64 + 1,
+            IQ_LANES_F64 * 3 + 2,
+            31,
+        ]
+    }
+
+    /// Returns convolution input lengths around lanes and larger blocks.
+    fn convolution_input_lengths() -> Vec<usize> {
+        let mut lengths = Vec::new();
+        for len in [1, 2, IQ_LANES.saturating_sub(1), IQ_LANES, IQ_LANES + 1, IQ_LANES * 3 + 2, 31, 128] {
+            push_unique_nonzero(&mut lengths, len);
+        }
+        lengths
+    }
+
+    /// Returns f64 convolution input lengths around lanes and larger blocks.
+    fn convolution_input_lengths_f64() -> Vec<usize> {
+        let mut lengths = Vec::new();
+        for len in [
+            1,
+            2,
+            IQ_LANES_F64.saturating_sub(1),
+            IQ_LANES_F64,
+            IQ_LANES_F64 + 1,
+            IQ_LANES_F64 * 3 + 2,
+            31,
+            128,
+        ] {
+            push_unique_nonzero(&mut lengths, len);
+        }
+        lengths
+    }
+
+    /// Returns kernel lengths used by direct convolution checks.
+    fn convolution_kernel_lengths() -> [usize; 4] {
+        [1, 2, 5, 51]
+    }
+
+    /// Pushes a nonzero length when it is not already present.
+    fn push_unique_nonzero(lengths: &mut Vec<usize>, len: usize) {
+        if len != 0 && !lengths.contains(&len) {
+            lengths.push(len);
+        }
+    }
+
+    /// Builds deterministic IQ samples for tests.
+    fn make_iq(len: usize, offset: f32) -> Vec<Complex<f32>> {
+        (0..len)
+            .map(|index| {
+                let value = index as f32 + offset;
+                Complex::new(value.sin() * 0.5, value.cos() * -0.25)
+            })
+            .collect()
+    }
+
+    /// Builds deterministic f64 IQ samples for tests.
+    fn make_iq_f64(len: usize, offset: f64) -> Vec<Complex<f64>> {
+        (0..len)
+            .map(|index| {
+                let value = index as f64 + offset;
+                Complex::new(value.sin() * 0.5, value.cos() * -0.25)
+            })
+            .collect()
+    }
+
+    /// Builds zeroed IQ samples for tests.
+    fn zero_iq(len: usize) -> Vec<Complex<f32>> {
+        vec![Complex::new(0.0, 0.0); len]
+    }
+
+    /// Builds zeroed f64 IQ samples for tests.
+    fn zero_iq_f64(len: usize) -> Vec<Complex<f64>> {
+        vec![Complex::new(0.0, 0.0); len]
+    }
+
+    /// Applies a frequency shifter through uneven block sizes.
+    fn shift_in_chunks(samples: &mut [Complex<f32>]) {
+        let mut shifter = FrequencyShifter::new(12_500.0, 1_000_000.0);
+        for chunk in samples.chunks_mut(11) {
+            shifter.process_block(chunk);
+        }
+    }
+
+    /// Applies an f64 frequency shifter through uneven block sizes.
+    fn shift_in_chunks_f64(samples: &mut [Complex<f64>]) {
+        let mut shifter = FrequencyShifter::new(12_500.0_f64, 1_000_000.0_f64);
+        for chunk in samples.chunks_mut(11) {
+            shifter.process_block(chunk);
+        }
+    }
+
+    /// Applies a FIR filter through uneven block sizes.
+    fn fir_in_chunks(input: &[Complex<f32>], output: &mut [Complex<f32>], taps: Vec<Complex<f32>>) {
+        let mut filter = FirFilter::new(taps);
+        for (input_chunk, output_chunk) in input.chunks(13).zip(output.chunks_mut(13)) {
+            filter.process_block_to(input_chunk, output_chunk);
+        }
+    }
+
+    /// Applies an f64 FIR filter through uneven block sizes.
+    fn fir_in_chunks_f64(input: &[Complex<f64>], output: &mut [Complex<f64>], taps: Vec<Complex<f64>>) {
+        let mut filter = FirFilter::new(taps);
+        for (input_chunk, output_chunk) in input.chunks(13).zip(output.chunks_mut(13)) {
+            filter.process_block_to(input_chunk, output_chunk);
+        }
+    }
+
+    /// Writes scalar f32 FIR output using one-sample processing.
+    fn write_fir_sample_reference(input: &[Complex<f32>], output: &mut [Complex<f32>], taps: Vec<Complex<f32>>) {
+        let mut filter = FirFilter::new(taps);
+        for (sample, output_sample) in input.iter().zip(output.iter_mut()) {
+            *output_sample = filter.process_sample(*sample);
+        }
+    }
+
+    /// Writes scalar f64 FIR output using one-sample processing.
+    fn write_fir_sample_reference_f64(input: &[Complex<f64>], output: &mut [Complex<f64>], taps: Vec<Complex<f64>>) {
+        let mut filter = FirFilter::new(taps);
+        for (sample, output_sample) in input.iter().zip(output.iter_mut()) {
+            *output_sample = filter.process_sample(*sample);
+        }
+    }
+
+    /// Asserts two complex slices are close.
+    fn assert_complex_slices_close(actual: &[Complex<f32>], expected: &[Complex<f32>], epsilon: f32) {
+        assert_eq!(actual.len(), expected.len());
+        for (actual_sample, expected_sample) in actual.iter().zip(expected.iter()) {
+            assert_close(actual_sample.re, expected_sample.re, epsilon);
+            assert_close(actual_sample.im, expected_sample.im, epsilon);
+        }
+    }
+
+    /// Asserts two complex values are close.
+    fn assert_complex_close(actual: Complex<f32>, expected: Complex<f32>, epsilon: f32) {
+        assert_close(actual.re, expected.re, epsilon);
+        assert_close(actual.im, expected.im, epsilon);
+    }
+
+    /// Asserts two f64 complex slices are close.
+    fn assert_complex_slices_close_f64(actual: &[Complex<f64>], expected: &[Complex<f64>], epsilon: f64) {
+        assert_eq!(actual.len(), expected.len());
+        for (actual_sample, expected_sample) in actual.iter().zip(expected.iter()) {
+            assert_close_f64(actual_sample.re, expected_sample.re, epsilon);
+            assert_close_f64(actual_sample.im, expected_sample.im, epsilon);
+        }
+    }
+
+    /// Asserts two f64 complex values are close.
+    fn assert_complex_close_f64(actual: Complex<f64>, expected: Complex<f64>, epsilon: f64) {
+        assert_close_f64(actual.re, expected.re, epsilon);
+        assert_close_f64(actual.im, expected.im, epsilon);
+    }
+
+    /// Asserts two f32 slices are close.
+    fn assert_slices_close(actual: &[f32], expected: &[f32], epsilon: f32) {
+        assert_eq!(actual.len(), expected.len());
+        for (actual_value, expected_value) in actual.iter().zip(expected.iter()) {
+            assert_close(*actual_value, *expected_value, epsilon);
+        }
+    }
+
+    /// Asserts two f64 slices are close.
+    fn assert_slices_close_f64(actual: &[f64], expected: &[f64], epsilon: f64) {
+        assert_eq!(actual.len(), expected.len());
+        for (actual_value, expected_value) in actual.iter().zip(expected.iter()) {
+            assert_close_f64(*actual_value, *expected_value, epsilon);
+        }
+    }
+
+    /// Asserts two f32 values are close.
+    fn assert_close(actual: f32, expected: f32, epsilon: f32) {
+        assert!(
+            (actual - expected).abs() <= epsilon,
+            "actual {actual} expected {expected} epsilon {epsilon}"
+        );
+    }
+
+    /// Asserts two f64 values are close.
+    fn assert_close_f64(actual: f64, expected: f64, epsilon: f64) {
+        assert!(
+            (actual - expected).abs() <= epsilon,
+            "actual {actual} expected {expected} epsilon {epsilon}"
+        );
     }
 }

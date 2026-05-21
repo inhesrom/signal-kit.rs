@@ -8,7 +8,7 @@ crate-type = ["rlib", "cdylib"]
 
 [dependencies]
 rustfft = "6.2.0"
-num-complex = "0.4"
+num-complex = { version = "0.4", features = ["bytemuck"] }
 num-traits = "0.2.19"
 rand = "0.8"
 rand_distr = "0.4"
@@ -20,8 +20,13 @@ pyo3 = { version = "0.22", features = ["extension-module"], optional = true }
 numpy = { version = "0.22", optional = true }
 
 [dev-dependencies]
+criterion = { version = "0.8", features = ["html_reports"] }
 plotly = "0.13"
 
 [features]
 default = []
 python = ["pyo3", "numpy"]
+
+[[bench]]
+name = "vector_simd"
+harness = false

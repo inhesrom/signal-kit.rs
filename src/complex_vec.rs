@@ -1,8 +1,9 @@
 #![allow(dead_code)]
 
-use num_complex::{Complex};
+use crate::vector_simd;
+use num_complex::Complex;
 use num_traits::Float;
-use std::ops::{Index, IndexMut, Add, Sub, Deref, DerefMut, Mul};
+use std::ops::{Add, Deref, DerefMut, Index, IndexMut, Mul, Sub};
 
 /// Convolution mode
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -29,19 +30,17 @@ where
 {
     pub fn new() -> Self {
         ComplexVec {
-            vector: Vec::<Complex<T>>::new()
+            vector: Vec::<Complex<T>>::new(),
         }
     }
 
     //Move vector into (ownership transfer)
     pub fn from_vec(vector: Vec<Complex<T>>) -> Self {
-        ComplexVec {
-            vector,
-        }
+        ComplexVec { vector }
     }
 
     pub fn replace_vec(&mut self, vector: Vec<Complex<T>>) {
-        self.vector = vector;  // Ownership transferred, old vector dropped
+        self.vector = vector; // Ownership transferred, old vector dropped
     }
 
     pub fn iter(&self) -> std::slice::Iter<'_, Complex<T>> {
@@ -62,21 +61,19 @@ where
 
     // Returns real vector of sqrt(r^2 + i^2)
     pub fn abs(&mut self) -> Vec<T> {
-        self.vector.iter().map(|x| x.norm() ).collect()
+        self.vector.iter().map(|x| x.norm()).collect()
     }
 
     // Normalize to unit magnitude
     pub fn normalize(&mut self) -> ComplexVec<T> {
         ComplexVec::from_vec(
-            self.vector.iter()
-            .map(|c| {
-                let mag = c.norm();
-                if mag > T::zero() {
-                    *c / mag
-                } else {
-                    *c
-                }
-            }).collect()
+            self.vector
+                .iter()
+                .map(|c| {
+                    let mag = c.norm();
+                    if mag > T::zero() { *c / mag } else { *c }
+                })
+                .collect(),
         )
     }
 
@@ -127,12 +124,12 @@ where
                 // Center the output to match input size
                 let delay = (kernel_len - 1) / 2;
                 full_result[delay..delay + input_len].to_vec()
-            },
+            }
             ConvMode::Valid => {
                 // Only fully overlapped portion
                 let valid_size = input_len - kernel_len + 1;
                 full_result[kernel_len - 1..kernel_len - 1 + valid_size].to_vec()
-            },
+            }
         };
 
         ComplexVec::from_vec(result)
@@ -211,7 +208,74 @@ where
         let result = self.vector.iter().map(|sample| sample * scale_t).collect();
         ComplexVec::from_vec(result)
     }
+}
 
+impl<T> ComplexVec<T>
+where
+    T: vector_simd::IqSample,
+{
+    /// Convolves with a kernel using the selected SIMD backend.
+    ///
+    /// # Panics
+    /// Panics when `self` or `kernel` is empty, or when `mode` is
+    /// `ConvMode::Valid` and the kernel is longer than the input.
+    pub fn convolve_simd(&self, kernel: &ComplexVec<T>, mode: ConvMode) -> ComplexVec<T> {
+        let output_len = convolve_simd_output_len(self.len(), kernel.len(), mode);
+        let mut output = vec![Complex::new(T::zero(), T::zero()); output_len];
+        self.convolve_simd_to(kernel, mode, &mut output);
+        ComplexVec::from_vec(output)
+    }
+
+    /// Writes selected-mode convolution output using the selected SIMD backend.
+    ///
+    /// # Panics
+    /// Panics when `self` or `kernel` is empty, when `mode` is
+    /// `ConvMode::Valid` and the kernel is longer than the input, or when
+    /// `output.len()` does not match the selected convolution mode.
+    pub fn convolve_simd_to(&self, kernel: &ComplexVec<T>, mode: ConvMode, output: &mut [Complex<T>]) {
+        let expected_len = convolve_simd_output_len(self.len(), kernel.len(), mode);
+        assert_eq!(output.len(), expected_len, "output length must match convolution mode");
+        vector_simd::selected_iq_vector_plan().iq_convolve_range_to(
+            &self.vector,
+            &kernel.vector,
+            convolve_simd_full_output_start(kernel.len(), mode),
+            output,
+        );
+    }
+}
+
+/// Returns the output length for a SIMD convolution mode.
+fn convolve_simd_output_len(input_len: usize, kernel_len: usize, mode: ConvMode) -> usize {
+    assert_convolve_simd_inputs(input_len, kernel_len);
+    match mode {
+        ConvMode::Full => input_len + kernel_len - 1,
+        ConvMode::Same => input_len,
+        ConvMode::Valid => valid_convolve_simd_output_len(input_len, kernel_len),
+    }
+}
+
+/// Returns the full-output start offset for a SIMD convolution mode.
+fn convolve_simd_full_output_start(kernel_len: usize, mode: ConvMode) -> usize {
+    match mode {
+        ConvMode::Full => 0,
+        ConvMode::Same => (kernel_len - 1) / 2,
+        ConvMode::Valid => kernel_len - 1,
+    }
+}
+
+/// Returns the valid-mode output length for SIMD convolution.
+fn valid_convolve_simd_output_len(input_len: usize, kernel_len: usize) -> usize {
+    assert!(
+        input_len >= kernel_len,
+        "valid convolution requires input length to be at least kernel length"
+    );
+    input_len - kernel_len + 1
+}
+
+/// Asserts that SIMD convolution inputs are non-empty.
+fn assert_convolve_simd_inputs(input_len: usize, kernel_len: usize) {
+    assert!(input_len > 0, "input must not be empty");
+    assert!(kernel_len > 0, "kernel must not be empty");
 }
 
 impl<T> Index<usize> for ComplexVec<T>
@@ -270,17 +334,8 @@ where
     type Output = Self;
 
     fn add(self, other: ComplexVec<T>) -> Self {
-        assert_eq!(
-            self.vector.len(),
-            other.vector.len(),
-            "ComplexVec addition requires equal lengths"
-        );
-        let result = self
-            .vector
-            .iter()
-            .zip(other.vector.iter())
-            .map(|(a, b)| a + b)
-            .collect();
+        assert_eq!(self.vector.len(), other.vector.len(), "ComplexVec addition requires equal lengths");
+        let result = self.vector.iter().zip(other.vector.iter()).map(|(a, b)| a + b).collect();
         ComplexVec::from_vec(result)
     }
 }
@@ -292,17 +347,8 @@ where
     type Output = ComplexVec<T>;
 
     fn add(self, other: &ComplexVec<T>) -> ComplexVec<T> {
-        assert_eq!(
-            self.vector.len(),
-            other.vector.len(),
-            "ComplexVec addition requires equal lengths"
-        );
-        let result = self
-            .vector
-            .iter()
-            .zip(other.vector.iter())
-            .map(|(a, b)| a + b)
-            .collect();
+        assert_eq!(self.vector.len(), other.vector.len(), "ComplexVec addition requires equal lengths");
+        let result = self.vector.iter().zip(other.vector.iter()).map(|(a, b)| a + b).collect();
         ComplexVec::from_vec(result)
     }
 }
@@ -314,17 +360,8 @@ where
     type Output = Self;
 
     fn sub(self, other: ComplexVec<T>) -> Self {
-        assert_eq!(
-            self.vector.len(),
-            other.vector.len(),
-            "ComplexVec subtraction requires equal lengths"
-        );
-        let result = self
-            .vector
-            .iter()
-            .zip(other.vector.iter())
-            .map(|(a, b)| a - b)
-            .collect();
+        assert_eq!(self.vector.len(), other.vector.len(), "ComplexVec subtraction requires equal lengths");
+        let result = self.vector.iter().zip(other.vector.iter()).map(|(a, b)| a - b).collect();
         ComplexVec::from_vec(result)
     }
 }
@@ -336,17 +373,8 @@ where
     type Output = ComplexVec<T>;
 
     fn sub(self, other: &ComplexVec<T>) -> ComplexVec<T> {
-        assert_eq!(
-            self.vector.len(),
-            other.vector.len(),
-            "ComplexVec subtraction requires equal lengths"
-        );
-        let result = self
-            .vector
-            .iter()
-            .zip(other.vector.iter())
-            .map(|(a, b)| a - b)
-            .collect();
+        assert_eq!(self.vector.len(), other.vector.len(), "ComplexVec subtraction requires equal lengths");
+        let result = self.vector.iter().zip(other.vector.iter()).map(|(a, b)| a - b).collect();
         ComplexVec::from_vec(result)
     }
 }
@@ -364,12 +392,7 @@ where
             other.vector.len(),
             "ComplexVec element-wise multiplication requires equal lengths"
         );
-        let result = self
-            .vector
-            .iter()
-            .zip(other.vector.iter())
-            .map(|(a, b)| a * b)
-            .collect();
+        let result = self.vector.iter().zip(other.vector.iter()).map(|(a, b)| a * b).collect();
         ComplexVec::from_vec(result)
     }
 }
@@ -387,12 +410,7 @@ where
             other.vector.len(),
             "ComplexVec element-wise multiplication requires equal lengths"
         );
-        let result = self
-            .vector
-            .iter()
-            .zip(other.vector.iter())
-            .map(|(a, b)| a * b)
-            .collect();
+        let result = self.vector.iter().zip(other.vector.iter()).map(|(a, b)| a * b).collect();
         ComplexVec::from_vec(result)
     }
 }
@@ -549,8 +567,8 @@ mod tests {
     #[test]
     fn test_abs() {
         let data = vec![
-            Complex::new(3.0, 4.0),  // mag = 5.0
-            Complex::new(0.0, 1.0),  // mag = 1.0
+            Complex::new(3.0, 4.0), // mag = 5.0
+            Complex::new(0.0, 1.0), // mag = 1.0
         ];
         let mut cv = ComplexVec::from_vec(data);
         let magnitudes = cv.abs();
@@ -561,10 +579,7 @@ mod tests {
 
     #[test]
     fn test_normalize() {
-        let data = vec![
-            Complex::new(3.0, 4.0),
-            Complex::new(5.0, 12.0),
-        ];
+        let data = vec![Complex::new(3.0, 4.0), Complex::new(5.0, 12.0)];
         let mut cv = ComplexVec::from_vec(data);
         let normalized = cv.normalize();
         let mags = normalized.vector;
@@ -575,10 +590,7 @@ mod tests {
 
     #[test]
     fn test_normalize_inplace() {
-        let data = vec![
-            Complex::new(3.0, 4.0),
-            Complex::new(5.0, 12.0),
-        ];
+        let data = vec![Complex::new(3.0, 4.0), Complex::new(5.0, 12.0)];
         let mut cv = ComplexVec::from_vec(data);
         cv.normalize_inplace();
 
@@ -588,10 +600,7 @@ mod tests {
 
     #[test]
     fn test_normalize_zero_magnitude() {
-        let data = vec![
-            Complex::new(0.0, 0.0),
-            Complex::new(3.0, 4.0),
-        ];
+        let data = vec![Complex::new(0.0, 0.0), Complex::new(3.0, 4.0)];
         let mut cv = ComplexVec::from_vec(data);
         cv.normalize_inplace();
 
@@ -608,10 +617,7 @@ mod tests {
             Complex::new(4.0, 0.0),
             Complex::new(5.0, 0.0),
         ];
-        let kernel = vec![
-            Complex::new(2.0, 0.0),
-            Complex::new(1.0, 0.0),
-        ];
+        let kernel = vec![Complex::new(2.0, 0.0), Complex::new(1.0, 0.0)];
 
         let sig = ComplexVec::from_vec(signal);
         let ker = ComplexVec::from_vec(kernel);
@@ -626,15 +632,8 @@ mod tests {
 
     #[test]
     fn test_convolve_full() {
-        let signal = vec![
-            Complex::new(1.0, 0.0),
-            Complex::new(2.0, 0.0),
-            Complex::new(3.0, 0.0),
-        ];
-        let kernel = vec![
-            Complex::new(1.0, 0.0),
-            Complex::new(1.0, 0.0),
-        ];
+        let signal = vec![Complex::new(1.0, 0.0), Complex::new(2.0, 0.0), Complex::new(3.0, 0.0)];
+        let kernel = vec![Complex::new(1.0, 0.0), Complex::new(1.0, 0.0)];
 
         let sig = ComplexVec::from_vec(signal);
         let ker = ComplexVec::from_vec(kernel);
@@ -649,15 +648,8 @@ mod tests {
 
     #[test]
     fn test_convolve_same() {
-        let signal = vec![
-            Complex::new(1.0, 0.0),
-            Complex::new(2.0, 0.0),
-            Complex::new(3.0, 0.0),
-        ];
-        let kernel = vec![
-            Complex::new(1.0, 0.0),
-            Complex::new(1.0, 0.0),
-        ];
+        let signal = vec![Complex::new(1.0, 0.0), Complex::new(2.0, 0.0), Complex::new(3.0, 0.0)];
+        let kernel = vec![Complex::new(1.0, 0.0), Complex::new(1.0, 0.0)];
 
         let sig = ComplexVec::from_vec(signal);
         let ker = ComplexVec::from_vec(kernel);
@@ -672,15 +664,8 @@ mod tests {
 
     #[test]
     fn test_convolve_inplace() {
-        let signal = vec![
-            Complex::new(1.0, 0.0),
-            Complex::new(2.0, 0.0),
-            Complex::new(3.0, 0.0),
-        ];
-        let kernel = vec![
-            Complex::new(1.0, 0.0),
-            Complex::new(1.0, 0.0),
-        ];
+        let signal = vec![Complex::new(1.0, 0.0), Complex::new(2.0, 0.0), Complex::new(3.0, 0.0)];
+        let kernel = vec![Complex::new(1.0, 0.0), Complex::new(1.0, 0.0)];
 
         let mut sig = ComplexVec::from_vec(signal);
         let ker = ComplexVec::from_vec(kernel);
@@ -693,10 +678,7 @@ mod tests {
 
     #[test]
     fn test_convolve_impulse() {
-        let signal = vec![
-            Complex::new(1.0, 2.0),
-            Complex::new(3.0, 4.0),
-        ];
+        let signal = vec![Complex::new(1.0, 2.0), Complex::new(3.0, 4.0)];
         let impulse = vec![Complex::new(1.0, 0.0)];
 
         let sig = ComplexVec::from_vec(signal.clone());
@@ -712,12 +694,88 @@ mod tests {
     }
 
     #[test]
+    fn test_convolve_simd_matches_convolve_full() {
+        assert_convolve_simd_matches_convolve(17, 5, ConvMode::Full);
+        assert_convolve_simd_matches_convolve(64, 51, ConvMode::Full);
+    }
+
+    #[test]
+    fn test_convolve_simd_matches_convolve_full_f64() {
+        assert_convolve_simd_matches_convolve_f64(17, 5, ConvMode::Full);
+        assert_convolve_simd_matches_convolve_f64(64, 51, ConvMode::Full);
+    }
+
+    #[test]
+    fn test_convolve_simd_matches_convolve_same() {
+        assert_convolve_simd_matches_convolve(17, 5, ConvMode::Same);
+        assert_convolve_simd_matches_convolve(64, 51, ConvMode::Same);
+    }
+
+    #[test]
+    fn test_convolve_simd_matches_convolve_same_f64() {
+        assert_convolve_simd_matches_convolve_f64(17, 5, ConvMode::Same);
+        assert_convolve_simd_matches_convolve_f64(64, 51, ConvMode::Same);
+    }
+
+    #[test]
+    fn test_convolve_simd_matches_convolve_valid() {
+        assert_convolve_simd_matches_convolve(17, 5, ConvMode::Valid);
+        assert_convolve_simd_matches_convolve(64, 51, ConvMode::Valid);
+    }
+
+    #[test]
+    fn test_convolve_simd_matches_convolve_valid_f64() {
+        assert_convolve_simd_matches_convolve_f64(17, 5, ConvMode::Valid);
+        assert_convolve_simd_matches_convolve_f64(64, 51, ConvMode::Valid);
+    }
+
+    #[test]
+    fn test_convolve_simd_to_matches_convolve() {
+        let signal = make_complex_vec_f32(23, 0.17);
+        let kernel = make_complex_vec_f32(7, -0.29);
+        let expected = signal.convolve(&kernel, ConvMode::Same);
+        let mut actual = vec![Complex::new(0.0, 0.0); expected.len()];
+        signal.convolve_simd_to(&kernel, ConvMode::Same, &mut actual);
+        assert_complex_slices_close(&actual, &expected.vector, F32_EPSILON);
+    }
+
+    #[test]
+    fn test_convolve_simd_to_matches_convolve_f64() {
+        let signal = make_complex_vec_f64(23, 0.17);
+        let kernel = make_complex_vec_f64(7, -0.29);
+        let expected = signal.convolve(&kernel, ConvMode::Same);
+        let mut actual = vec![Complex::new(0.0, 0.0); expected.len()];
+        signal.convolve_simd_to(&kernel, ConvMode::Same, &mut actual);
+        assert_complex_slices_close_f64(&actual, &expected.vector, F64_EPSILON);
+    }
+
+    #[test]
+    fn test_convolve_simd_impulse() {
+        let signal = make_complex_vec_f32(13, 0.07);
+        let impulse = ComplexVec::from_vec(vec![Complex::new(1.0, 0.0)]);
+        let result = signal.convolve_simd(&impulse, ConvMode::Valid);
+        assert_complex_slices_close(&result.vector, &signal.vector, F32_EPSILON);
+    }
+
+    #[test]
+    fn test_convolve_simd_impulse_f64() {
+        let signal = make_complex_vec_f64(13, 0.07);
+        let impulse = ComplexVec::from_vec(vec![Complex::new(1.0, 0.0)]);
+        let result = signal.convolve_simd(&impulse, ConvMode::Valid);
+        assert_complex_slices_close_f64(&result.vector, &signal.vector, F64_EPSILON);
+    }
+
+    #[test]
+    #[should_panic(expected = "valid convolution requires input length to be at least kernel length")]
+    fn test_convolve_simd_valid_panics_when_kernel_is_longer() {
+        let signal = make_complex_vec_f32(4, 0.0);
+        let kernel = make_complex_vec_f32(5, 0.0);
+        signal.convolve_simd(&kernel, ConvMode::Valid);
+    }
+
+    #[test]
     fn test_indexing() {
-        let data = vec![
-            Complex::new(1.0, 2.0),
-            Complex::new(3.0, 4.0),
-            Complex::new(5.0, 6.0),
-        ];
+        let data = vec![Complex::new(1.0, 2.0), Complex::new(3.0, 4.0), Complex::new(5.0, 6.0)];
         let mut cv = ComplexVec::from_vec(data);
 
         // Test read indexing
@@ -732,14 +790,8 @@ mod tests {
 
     #[test]
     fn test_mul_element_wise() {
-        let a = ComplexVec::from_vec(vec![
-            Complex::new(2.0, 1.0),
-            Complex::new(3.0, 2.0),
-        ]);
-        let b = ComplexVec::from_vec(vec![
-            Complex::new(1.0, 1.0),
-            Complex::new(2.0, 0.0),
-        ]);
+        let a = ComplexVec::from_vec(vec![Complex::new(2.0, 1.0), Complex::new(3.0, 2.0)]);
+        let b = ComplexVec::from_vec(vec![Complex::new(1.0, 1.0), Complex::new(2.0, 0.0)]);
 
         // Test owned multiplication
         let c = a.clone() * b.clone();
@@ -756,10 +808,7 @@ mod tests {
 
     #[test]
     fn test_mul_complex_scalar() {
-        let vec = ComplexVec::from_vec(vec![
-            Complex::new(1.0, 2.0),
-            Complex::new(3.0, 4.0),
-        ]);
+        let vec = ComplexVec::from_vec(vec![Complex::new(1.0, 2.0), Complex::new(3.0, 4.0)]);
         let scalar = Complex::new(2.0, 1.0);
 
         // Test vec * scalar (owned)
@@ -787,10 +836,7 @@ mod tests {
 
     #[test]
     fn test_mul_real_scalar_f64() {
-        let vec = ComplexVec::from_vec(vec![
-            Complex::new(1.0_f64, 2.0_f64),
-            Complex::new(3.0_f64, 4.0_f64),
-        ]);
+        let vec = ComplexVec::from_vec(vec![Complex::new(1.0_f64, 2.0_f64), Complex::new(3.0_f64, 4.0_f64)]);
         let scalar = 2.5_f64;
 
         // Test vec * scalar (owned)
@@ -816,10 +862,7 @@ mod tests {
 
     #[test]
     fn test_mul_real_scalar_f32() {
-        let vec = ComplexVec::from_vec(vec![
-            Complex::new(1.0_f32, 2.0_f32),
-            Complex::new(3.0_f32, 4.0_f32),
-        ]);
+        let vec = ComplexVec::from_vec(vec![Complex::new(1.0_f32, 2.0_f32), Complex::new(3.0_f32, 4.0_f32)]);
         let scalar = 2.5_f32;
 
         // Test vec * scalar (owned)
@@ -841,5 +884,62 @@ mod tests {
         let result4 = scalar * &vec;
         assert_eq!(result4[0], Complex::new(2.5, 5.0));
         assert_eq!(result4[1], Complex::new(7.5, 10.0));
+    }
+
+    const F32_EPSILON: f32 = 1.0e-4;
+    const F64_EPSILON: f64 = 1.0e-10;
+
+    fn assert_convolve_simd_matches_convolve(input_len: usize, kernel_len: usize, mode: ConvMode) {
+        let signal = make_complex_vec_f32(input_len, 0.13);
+        let kernel = make_complex_vec_f32(kernel_len, -0.21);
+        let actual = signal.convolve_simd(&kernel, mode);
+        let expected = signal.convolve(&kernel, mode);
+        assert_complex_slices_close(&actual.vector, &expected.vector, F32_EPSILON);
+    }
+
+    fn assert_convolve_simd_matches_convolve_f64(input_len: usize, kernel_len: usize, mode: ConvMode) {
+        let signal = make_complex_vec_f64(input_len, 0.13);
+        let kernel = make_complex_vec_f64(kernel_len, -0.21);
+        let actual = signal.convolve_simd(&kernel, mode);
+        let expected = signal.convolve(&kernel, mode);
+        assert_complex_slices_close_f64(&actual.vector, &expected.vector, F64_EPSILON);
+    }
+
+    fn make_complex_vec_f32(len: usize, offset: f32) -> ComplexVec<f32> {
+        ComplexVec::from_vec(
+            (0..len)
+                .map(|index| {
+                    let value = index as f32 + offset;
+                    Complex::new(value.sin() * 0.5, value.cos() * -0.25)
+                })
+                .collect(),
+        )
+    }
+
+    fn make_complex_vec_f64(len: usize, offset: f64) -> ComplexVec<f64> {
+        ComplexVec::from_vec(
+            (0..len)
+                .map(|index| {
+                    let value = index as f64 + offset;
+                    Complex::new(value.sin() * 0.5, value.cos() * -0.25)
+                })
+                .collect(),
+        )
+    }
+
+    fn assert_complex_slices_close(actual: &[Complex<f32>], expected: &[Complex<f32>], epsilon: f32) {
+        assert_eq!(actual.len(), expected.len());
+        for (actual_sample, expected_sample) in actual.iter().zip(expected.iter()) {
+            assert!((actual_sample.re - expected_sample.re).abs() <= epsilon);
+            assert!((actual_sample.im - expected_sample.im).abs() <= epsilon);
+        }
+    }
+
+    fn assert_complex_slices_close_f64(actual: &[Complex<f64>], expected: &[Complex<f64>], epsilon: f64) {
+        assert_eq!(actual.len(), expected.len());
+        for (actual_sample, expected_sample) in actual.iter().zip(expected.iter()) {
+            assert!((actual_sample.re - expected_sample.re).abs() <= epsilon);
+            assert!((actual_sample.im - expected_sample.im).abs() <= epsilon);
+        }
     }
 }
