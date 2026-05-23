@@ -82,9 +82,18 @@ fn bench_fft_resample_variant(group: &mut BenchmarkGroup<'_, WallTime>, case: Ra
 /// Returns the resampling ratios benchmarked here.
 fn ratio_cases() -> [RatioCase; 3] {
     [
-        RatioCase { input_rate: 1.0, output_rate: 1.5 },
-        RatioCase { input_rate: 1.0, output_rate: 2.0 },
-        RatioCase { input_rate: 1.0, output_rate: 0.8 },
+        RatioCase {
+            input_rate: 1.0,
+            output_rate: 1.5,
+        },
+        RatioCase {
+            input_rate: 1.0,
+            output_rate: 2.0,
+        },
+        RatioCase {
+            input_rate: 1.0,
+            output_rate: 0.8,
+        },
     ]
 }
 

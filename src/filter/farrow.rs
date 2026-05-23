@@ -48,15 +48,15 @@ impl<T: Float> FarrowResampler<T> {
     ///
     /// # Panics
     ///
-    /// Panics if either `input_rate` or `output_rate` is not strictly positive.
+    /// Panics if either rate or the derived resampling step is not finite and
+    /// strictly positive.
     pub fn cubic_lagrange(input_rate: T, output_rate: T) -> Self {
-        assert!(input_rate > T::zero(), "input_rate must be positive");
-        assert!(output_rate > T::zero(), "output_rate must be positive");
+        let step = resampling_step(input_rate, output_rate);
         Self {
             delay: zero_delay::<T>(),
             head: 0,
             mu: T::zero(),
-            step: input_rate / output_rate,
+            step,
             coeffs: cubic_lagrange_coeffs::<T>(),
         }
     }
@@ -140,6 +140,21 @@ fn zero_delay<T: Float>() -> [Complex<T>; NUM_TAPS] {
     [Complex::new(T::zero(), T::zero()); NUM_TAPS]
 }
 
+/// Calculates and validates the fractional phase increment.
+fn resampling_step<T: Float>(input_rate: T, output_rate: T) -> T {
+    assert_valid_rate("input_rate", input_rate);
+    assert_valid_rate("output_rate", output_rate);
+
+    let step = input_rate / output_rate;
+    assert!(step.is_finite() && step > T::zero(), "resampling step must be finite and positive");
+    step
+}
+
+/// Asserts that a sample rate can produce forward resampler progress.
+fn assert_valid_rate<T: Float>(name: &str, rate: T) {
+    assert!(rate.is_finite() && rate > T::zero(), "{} must be finite and positive", name);
+}
+
 /// Builds the cubic-Lagrange coefficient table for a centred 4-tap Farrow
 /// kernel. Rows index powers of `mu` (0..=3); columns index taps with `k=0`
 /// oldest and `k=3` newest. At `mu=0` the polynomial returns `x_1` exactly;
@@ -151,10 +166,10 @@ fn cubic_lagrange_coeffs<T: Float>() -> [[T; NUM_TAPS]; POLY_ROWS] {
     let third = T::from(1.0 / 3.0).unwrap();
     let sixth = T::from(1.0 / 6.0).unwrap();
     [
-        [zero,   one,   zero,  zero ],
-        [-third, -half, one,   -sixth],
-        [half,   -one,  half,  zero ],
-        [-sixth, half,  -half, sixth],
+        [zero, one, zero, zero],
+        [-third, -half, one, -sixth],
+        [half, -one, half, zero],
+        [-sixth, half, -half, sixth],
     ]
 }
 
@@ -165,24 +180,58 @@ mod tests {
     use std::f64::consts::PI;
 
     #[test]
-    #[should_panic(expected = "input_rate must be positive")]
+    #[should_panic(expected = "input_rate must be finite and positive")]
     fn test_constructor_panics_on_zero_input_rate() {
         FarrowResampler::<f64>::cubic_lagrange(0.0, 1.0);
     }
 
     #[test]
-    #[should_panic(expected = "output_rate must be positive")]
+    #[should_panic(expected = "output_rate must be finite and positive")]
     fn test_constructor_panics_on_negative_output_rate() {
         FarrowResampler::<f64>::cubic_lagrange(1.0, -1.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "input_rate must be finite and positive")]
+    fn test_constructor_panics_on_nan_input_rate() {
+        FarrowResampler::<f64>::cubic_lagrange(f64::NAN, 1.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "input_rate must be finite and positive")]
+    fn test_constructor_panics_on_infinite_input_rate() {
+        FarrowResampler::<f64>::cubic_lagrange(f64::INFINITY, 1.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "output_rate must be finite and positive")]
+    fn test_constructor_panics_on_nan_output_rate() {
+        FarrowResampler::<f64>::cubic_lagrange(1.0, f64::NAN);
+    }
+
+    #[test]
+    #[should_panic(expected = "output_rate must be finite and positive")]
+    fn test_constructor_panics_on_infinite_output_rate() {
+        FarrowResampler::<f64>::cubic_lagrange(1.0, f64::INFINITY);
+    }
+
+    #[test]
+    #[should_panic(expected = "resampling step must be finite and positive")]
+    fn test_constructor_panics_on_underflowed_step() {
+        FarrowResampler::<f64>::cubic_lagrange(f64::MIN_POSITIVE, f64::MAX);
+    }
+
+    #[test]
+    #[should_panic(expected = "resampling step must be finite and positive")]
+    fn test_constructor_panics_on_overflowed_step() {
+        FarrowResampler::<f64>::cubic_lagrange(f64::MAX, f64::MIN_POSITIVE);
     }
 
     #[test]
     fn test_empty_input_no_op() {
         let mut a = FarrowResampler::<f64>::cubic_lagrange(1.0, 1.5);
         let mut b = FarrowResampler::<f64>::cubic_lagrange(1.0, 1.5);
-        let input: Vec<Complex<f64>> = (0..20)
-            .map(|i| Complex::new((i as f64).sin(), (i as f64).cos()))
-            .collect();
+        let input: Vec<Complex<f64>> = (0..20).map(|i| Complex::new((i as f64).sin(), (i as f64).cos())).collect();
 
         let direct = a.process_block(&input);
         let empty = b.process_block(&[]);
@@ -200,10 +249,20 @@ mod tests {
             let mut resampler = FarrowResampler::<f64>::cubic_lagrange(input_rate, output_rate);
             let output = resampler.process_block(&input);
             for sample in output.iter().skip(10) {
-                assert!((sample.re - dc.re).abs() < 1e-12,
-                    "rates=({},{}) sample={:?}", input_rate, output_rate, sample);
-                assert!((sample.im - dc.im).abs() < 1e-12,
-                    "rates=({},{}) sample={:?}", input_rate, output_rate, sample);
+                assert!(
+                    (sample.re - dc.re).abs() < 1e-12,
+                    "rates=({},{}) sample={:?}",
+                    input_rate,
+                    output_rate,
+                    sample
+                );
+                assert!(
+                    (sample.im - dc.im).abs() < 1e-12,
+                    "rates=({},{}) sample={:?}",
+                    input_rate,
+                    output_rate,
+                    sample
+                );
             }
         }
     }
@@ -211,9 +270,7 @@ mod tests {
     #[test]
     fn test_identity_at_unit_ratio() {
         let mut resampler = FarrowResampler::<f64>::cubic_lagrange(1.0, 1.0);
-        let input: Vec<Complex<f64>> = (0..30)
-            .map(|i| Complex::new(i as f64, -(i as f64) * 0.5))
-            .collect();
+        let input: Vec<Complex<f64>> = (0..30).map(|i| Complex::new(i as f64, -(i as f64) * 0.5)).collect();
         let output = resampler.process_block(&input);
 
         assert_eq!(output.len(), input.len());
@@ -225,9 +282,7 @@ mod tests {
 
     #[test]
     fn test_block_split_continuity() {
-        let input: Vec<Complex<f64>> = (0..1024)
-            .map(|i| Complex::new((i as f64 * 0.1).sin(), (i as f64 * 0.13).cos()))
-            .collect();
+        let input: Vec<Complex<f64>> = (0..1024).map(|i| Complex::new((i as f64 * 0.1).sin(), (i as f64 * 0.13).cos())).collect();
 
         for (input_rate, output_rate) in [(1.0, 1.5), (1.0, 2.0), (1.0, 0.8)] {
             for split in [1, 100, 400, 1000] {
@@ -238,15 +293,35 @@ mod tests {
                 let mut split_out = split_resampler.process_block(&input[..split]);
                 split_out.extend(split_resampler.process_block(&input[split..]));
 
-                assert_eq!(full_out.len(), split_out.len(),
-                    "len mismatch rates=({},{}) split={}", input_rate, output_rate, split);
+                assert_eq!(
+                    full_out.len(),
+                    split_out.len(),
+                    "len mismatch rates=({},{}) split={}",
+                    input_rate,
+                    output_rate,
+                    split
+                );
                 for (k, (a, b)) in full_out.iter().zip(split_out.iter()).enumerate() {
-                    assert!((a.re - b.re).abs() < 1e-12,
+                    assert!(
+                        (a.re - b.re).abs() < 1e-12,
                         "re mismatch rates=({},{}) split={} k={} {} vs {}",
-                        input_rate, output_rate, split, k, a.re, b.re);
-                    assert!((a.im - b.im).abs() < 1e-12,
+                        input_rate,
+                        output_rate,
+                        split,
+                        k,
+                        a.re,
+                        b.re
+                    );
+                    assert!(
+                        (a.im - b.im).abs() < 1e-12,
                         "im mismatch rates=({},{}) split={} k={} {} vs {}",
-                        input_rate, output_rate, split, k, a.im, b.im);
+                        input_rate,
+                        output_rate,
+                        split,
+                        k,
+                        a.im,
+                        b.im
+                    );
                 }
             }
         }
@@ -254,9 +329,7 @@ mod tests {
 
     #[test]
     fn test_reset_clears_state() {
-        let input: Vec<Complex<f64>> = (0..200)
-            .map(|i| Complex::new((i as f64 * 0.07).sin(), (i as f64 * 0.11).cos()))
-            .collect();
+        let input: Vec<Complex<f64>> = (0..200).map(|i| Complex::new((i as f64 * 0.07).sin(), (i as f64 * 0.11).cos())).collect();
 
         let mut resampler = FarrowResampler::<f64>::cubic_lagrange(1.0, 1.5);
         let first = resampler.process_block(&input);
@@ -275,9 +348,15 @@ mod tests {
                 let output = resampler.process_block(&input);
                 let expected = ((input_len as f64) * output_rate / input_rate).round() as i64;
                 let delta = (output.len() as i64 - expected).abs();
-                assert!(delta <= 1,
+                assert!(
+                    delta <= 1,
                     "rates=({},{}) input_len={} output_len={} expected={}",
-                    input_rate, output_rate, input_len, output.len(), expected);
+                    input_rate,
+                    output_rate,
+                    input_len,
+                    output.len(),
+                    expected
+                );
             }
         }
     }
@@ -305,10 +384,8 @@ mod tests {
                 let sample = Complex::new((i as f64).sin(), (i as f64).cos());
                 resampler.process_block(&[sample]);
                 let mu = resampler.mu_for_test();
-                assert!(mu >= 0.0,
-                    "step={} i={} mu={}", step_input_rate, i, mu);
-                assert!(mu < step_input_rate + 1e-9,
-                    "step={} i={} mu={}", step_input_rate, i, mu);
+                assert!(mu >= 0.0, "step={} i={} mu={}", step_input_rate, i, mu);
+                assert!(mu < step_input_rate + 1e-9, "step={} i={} mu={}", step_input_rate, i, mu);
             }
         }
     }
@@ -332,16 +409,22 @@ mod tests {
         let mut spectrum: Vec<Complex<f64>> = output[warm_up..warm_up + fft_size].to_vec();
         fft(&mut spectrum);
 
-        let (peak_bin, _) = spectrum.iter().enumerate()
+        let (peak_bin, _) = spectrum
+            .iter()
+            .enumerate()
             .max_by(|left, right| left.1.norm().partial_cmp(&right.1.norm()).unwrap())
             .unwrap();
 
         let f_norm_output = f_norm_input * 0.5;
         let expected_bin = (f_norm_output * fft_size as f64).round() as i64;
         let delta = (peak_bin as i64 - expected_bin).abs();
-        assert!(delta <= 1,
+        assert!(
+            delta <= 1,
             "Peak bin {} not within 1 of expected {} (fft_size={})",
-            peak_bin, expected_bin, fft_size);
+            peak_bin,
+            expected_bin,
+            fft_size
+        );
     }
 
     #[test]
@@ -358,15 +441,7 @@ mod tests {
         let symbol_rate_hz = 1e6_f64;
         let block_size: usize = 4096;
 
-        let mut carrier = PskCarrier::new(
-            input_rate_hz,
-            symbol_rate_hz,
-            ModType::_QPSK,
-            0.35_f64,
-            block_size,
-            51,
-            Some(7),
-        );
+        let mut carrier = PskCarrier::new(input_rate_hz, symbol_rate_hz, ModType::_QPSK, 0.35_f64, block_size, 51, Some(7));
         let signal = carrier.generate_block();
 
         let input_slice: Vec<Complex<f64>> = signal.iter().cloned().collect();
@@ -392,16 +467,14 @@ mod tests {
         let mut input_fft = ComplexVec::from_vec(input_fft_data);
         let mut input_db: Vec<f64> = vector_ops::to_db(&input_fft.abs());
         fftshift::<f64>(&mut input_db);
-        let input_freqs: Vec<f64> =
-            fftfreqs::<f64>(-input_rate_hz / 2.0, input_rate_hz / 2.0, input_db.len());
+        let input_freqs: Vec<f64> = fftfreqs::<f64>(-input_rate_hz / 2.0, input_rate_hz / 2.0, input_db.len());
 
         let mut output_fft_data = resampled.clone();
         fft(&mut output_fft_data[..]);
         let mut output_fft = ComplexVec::from_vec(output_fft_data);
         let mut output_db: Vec<f64> = vector_ops::to_db(&output_fft.abs());
         fftshift::<f64>(&mut output_db);
-        let output_freqs: Vec<f64> =
-            fftfreqs::<f64>(-output_rate_hz / 2.0, output_rate_hz / 2.0, output_db.len());
+        let output_freqs: Vec<f64> = fftfreqs::<f64>(-output_rate_hz / 2.0, output_rate_hz / 2.0, output_db.len());
 
         use crate::plot::plot_spectrum_pair;
         plot_spectrum_pair(
@@ -421,8 +494,7 @@ mod tests {
                 let row_sum: f64 = coeffs[power].iter().sum();
                 sum_at_mu = sum_at_mu * mu + row_sum;
             }
-            assert!((sum_at_mu - 1.0).abs() < 1e-12,
-                "Tap-sum at mu={} = {} (expected 1.0)", mu, sum_at_mu);
+            assert!((sum_at_mu - 1.0).abs() < 1e-12, "Tap-sum at mu={} = {} (expected 1.0)", mu, sum_at_mu);
         }
     }
 }

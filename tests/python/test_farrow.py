@@ -19,16 +19,32 @@ class TestFarrowResamplerCreation:
         assert resampler is not None
 
     def test_invalid_input_rate_zero(self):
-        with pytest.raises(ValueError, match="input_rate_hz must be positive"):
+        with pytest.raises(ValueError, match="input_rate_hz must be finite and positive"):
             signal_kit.FarrowResampler(0.0, 1e6)
 
     def test_invalid_input_rate_negative(self):
-        with pytest.raises(ValueError, match="input_rate_hz must be positive"):
+        with pytest.raises(ValueError, match="input_rate_hz must be finite and positive"):
             signal_kit.FarrowResampler(-1.0, 1e6)
 
+    def test_invalid_input_rate_nan(self):
+        with pytest.raises(ValueError, match="input_rate_hz must be finite and positive"):
+            signal_kit.FarrowResampler(np.nan, 1e6)
+
+    def test_invalid_input_rate_inf(self):
+        with pytest.raises(ValueError, match="input_rate_hz must be finite and positive"):
+            signal_kit.FarrowResampler(np.inf, 1e6)
+
     def test_invalid_output_rate_zero(self):
-        with pytest.raises(ValueError, match="output_rate_hz must be positive"):
+        with pytest.raises(ValueError, match="output_rate_hz must be finite and positive"):
             signal_kit.FarrowResampler(1e6, 0.0)
+
+    def test_invalid_output_rate_nan(self):
+        with pytest.raises(ValueError, match="output_rate_hz must be finite and positive"):
+            signal_kit.FarrowResampler(1e6, np.nan)
+
+    def test_invalid_output_rate_inf(self):
+        with pytest.raises(ValueError, match="output_rate_hz must be finite and positive"):
+            signal_kit.FarrowResampler(1e6, np.inf)
 
 
 class TestFarrowResamplerProcess:

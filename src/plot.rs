@@ -1,8 +1,8 @@
 use num_complex::Complex;
 use num_traits::Float;
-use plotly::{Plot, Scatter, Layout};
 use plotly::common::Mode;
 use plotly::layout::{Axis, GridPattern, LayoutGrid};
+use plotly::{Layout, Plot, Scatter};
 
 /// Plot a spectrum or frequency response
 ///
@@ -42,11 +42,7 @@ pub fn plot_spectrum<T: Float>(freqs: &Vec<T>, spectrum: &Vec<T>, title: &str) {
 /// * `left` - `(freqs, spectrum_db, subtitle)` for the left panel.
 /// * `right` - `(freqs, spectrum_db, subtitle)` for the right panel.
 /// * `title` - Overall figure title.
-pub fn plot_spectrum_pair<T: Float>(
-    left: (&Vec<T>, &Vec<T>, &str),
-    right: (&Vec<T>, &Vec<T>, &str),
-    title: &str,
-) {
+pub fn plot_spectrum_pair<T: Float>(left: (&Vec<T>, &Vec<T>, &str), right: (&Vec<T>, &Vec<T>, &str), title: &str) {
     let mut plot = Plot::new();
     plot.add_trace(spectrum_subplot_trace(left.0, left.1, left.2, "x1", "y1"));
     plot.add_trace(spectrum_subplot_trace(right.0, right.1, right.2, "x2", "y2"));
@@ -55,13 +51,7 @@ pub fn plot_spectrum_pair<T: Float>(
 }
 
 /// Builds one frequency-vs-dB trace attached to the given subplot axes.
-fn spectrum_subplot_trace<T: Float>(
-    freqs: &[T],
-    spectrum: &[T],
-    name: &str,
-    x_axis: &str,
-    y_axis: &str,
-) -> Box<Scatter<f64, f64>> {
+fn spectrum_subplot_trace<T: Float>(freqs: &[T], spectrum: &[T], name: &str, x_axis: &str, y_axis: &str) -> Box<Scatter<f64, f64>> {
     let freqs_f64: Vec<f64> = freqs.iter().map(|f| f.to_f64().unwrap()).collect();
     let spectrum_f64: Vec<f64> = spectrum.iter().map(|s| s.to_f64().unwrap()).collect();
     Scatter::new(freqs_f64, spectrum_f64)
@@ -75,12 +65,7 @@ fn spectrum_subplot_trace<T: Float>(
 fn side_by_side_spectrum_layout(title: &str) -> Layout {
     Layout::new()
         .title(title)
-        .grid(
-            LayoutGrid::new()
-                .rows(1)
-                .columns(2)
-                .pattern(GridPattern::Independent),
-        )
+        .grid(LayoutGrid::new().rows(1).columns(2).pattern(GridPattern::Independent))
         .x_axis(Axis::new().title("Frequency (Hz)").domain(&[0.0, 0.45]))
         .y_axis(Axis::new().title("Magnitude (dB)").domain(&[0.0, 1.0]))
         .x_axis2(Axis::new().title("Frequency (Hz)").domain(&[0.55, 1.0]))
@@ -122,9 +107,7 @@ pub fn plot_constellation<T: Float + std::fmt::Display>(symbols: &[Complex<T>], 
     }
 
     // Create scatter plot for constellation points
-    let trace = Scatter::new(i_vals.clone(), q_vals.clone())
-        .mode(Mode::Markers)
-        .name("Constellation");
+    let trace = Scatter::new(i_vals.clone(), q_vals.clone()).mode(Mode::Markers).name("Constellation");
 
     let mut plot = Plot::new();
     plot.add_trace(trace);
@@ -150,7 +133,7 @@ pub fn plot_constellation<T: Float + std::fmt::Display>(symbols: &[Complex<T>], 
             Axis::new()
                 .title("Quadrature (Q)")
                 .scale_anchor("x")
-                .constrain(plotly::layout::AxisConstrain::Domain)
+                .constrain(plotly::layout::AxisConstrain::Domain),
         )
         .auto_size(true);
     plot.set_layout(layout);
