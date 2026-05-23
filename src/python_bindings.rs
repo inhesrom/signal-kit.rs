@@ -1,12 +1,13 @@
 #![cfg(feature = "python")]
 
+use crate::filter::FarrowResampler;
+use crate::generate::Impairment;
+use crate::spectrum::{WindowType, welch as welch_impl};
+use crate::{Carrier, Channel, ModType};
+use num_complex::Complex;
+use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
-use numpy::{PyArray1, IntoPyArray, PyReadonlyArray1};
-use num_complex::Complex;
-use crate::{Carrier, Channel, ModType};
-use crate::generate::Impairment;
-use crate::spectrum::{welch as welch_impl, WindowType};
 
 /// Helper function to parse modulation type from string
 ///
@@ -29,14 +30,12 @@ fn parse_modulation(mod_str: &str) -> PyResult<ModType> {
         "32QAM" => Ok(ModType::_32QAM),
         "64QAM" => Ok(ModType::_64QAM),
         "CW" => Ok(ModType::_CW),
-        _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            format!(
-                "Unknown modulation type: '{}'. Supported types (case-insensitive):\n  \
+        _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "Unknown modulation type: '{}'. Supported types (case-insensitive):\n  \
                  BPSK (Binary PSK), QPSK (Quadrature PSK), 8PSK, 16APSK, \n  \
                  16QAM, 32QAM, 64QAM, CW (Continuous Wave)",
-                mod_str
-            ),
-        )),
+            mod_str
+        ))),
     }
 }
 
@@ -60,12 +59,10 @@ fn parse_impairment(config: &Bound<PyAny>) -> PyResult<Impairment> {
             "digitizer_droop_ad9361" => Ok(Impairment::DigitizerDroopAD9361),
             "digitizer_droop_traditional" => Ok(Impairment::DigitizerDroopTraditional),
             "cosine_taper_digitizer" => Ok(Impairment::CosineTaperDigitizer),
-            _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                format!(
-                    "Unknown impairment: '{}'. Supported strings: digitizer_droop_ad9361, digitizer_droop_traditional, cosine_taper_digitizer. Or use a dict with 'type' key.",
-                    s
-                ),
-            )),
+            _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Unknown impairment: '{}'. Supported strings: digitizer_droop_ad9361, digitizer_droop_traditional, cosine_taper_digitizer. Or use a dict with 'type' key.",
+                s
+            ))),
         };
     }
 
@@ -73,30 +70,22 @@ fn parse_impairment(config: &Bound<PyAny>) -> PyResult<Impairment> {
     if let Ok(dict) = config.downcast::<PyDict>() {
         let impairment_type: String = dict
             .get_item("type")?
-            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Dictionary must have 'type' key",
-            ))?
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>("Dictionary must have 'type' key"))?
             .extract()?;
 
         return match impairment_type.to_lowercase().as_str() {
             "digitizer_droop" => {
                 let order: i32 = dict
                     .get_item("order")?
-                    .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                        "'digitizer_droop' requires 'order' parameter",
-                    ))?
+                    .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>("'digitizer_droop' requires 'order' parameter"))?
                     .extract()?;
                 let cutoff: f64 = dict
                     .get_item("cutoff")?
-                    .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                        "'digitizer_droop' requires 'cutoff' parameter",
-                    ))?
+                    .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>("'digitizer_droop' requires 'cutoff' parameter"))?
                     .extract()?;
 
                 if !(0.0..=0.5).contains(&cutoff) {
-                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                        "cutoff must be in range [0.0, 0.5]",
-                    ));
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("cutoff must be in range [0.0, 0.5]"));
                 }
 
                 Ok(Impairment::DigitizerDroop { order, cutoff })
@@ -104,15 +93,11 @@ fn parse_impairment(config: &Bound<PyAny>) -> PyResult<Impairment> {
             "frequency_variation" => {
                 let amplitude_db: f64 = dict
                     .get_item("amplitude_db")?
-                    .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                        "'frequency_variation' requires 'amplitude_db' parameter",
-                    ))?
+                    .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>("'frequency_variation' requires 'amplitude_db' parameter"))?
                     .extract()?;
                 let cycles: f64 = dict
                     .get_item("cycles")?
-                    .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                        "'frequency_variation' requires 'cycles' parameter",
-                    ))?
+                    .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>("'frequency_variation' requires 'cycles' parameter"))?
                     .extract()?;
                 let phase_offset: f64 = match dict.get_item("phase_offset") {
                     Ok(Some(v)) => v.extract().unwrap_or(0.0),
@@ -128,15 +113,11 @@ fn parse_impairment(config: &Bound<PyAny>) -> PyResult<Impairment> {
             "cosine_taper" => {
                 let passband_end: f64 = dict
                     .get_item("passband_end")?
-                    .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                        "'cosine_taper' requires 'passband_end' parameter",
-                    ))?
+                    .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>("'cosine_taper' requires 'passband_end' parameter"))?
                     .extract()?;
                 let stopband_start: f64 = dict
                     .get_item("stopband_start")?
-                    .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                        "'cosine_taper' requires 'stopband_start' parameter",
-                    ))?
+                    .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>("'cosine_taper' requires 'stopband_start' parameter"))?
                     .extract()?;
 
                 if stopband_start <= passband_end {
@@ -150,12 +131,10 @@ fn parse_impairment(config: &Bound<PyAny>) -> PyResult<Impairment> {
                     stopband_start,
                 })
             }
-            _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                format!(
-                    "Unknown impairment type: '{}'. Supported types: digitizer_droop, frequency_variation, cosine_taper",
-                    impairment_type
-                ),
-            )),
+            _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Unknown impairment type: '{}'. Supported types: digitizer_droop, frequency_variation, cosine_taper",
+                impairment_type
+            ))),
         };
     }
 
@@ -211,9 +190,7 @@ impl PythonCarrier {
 
         // Validate parameters (same validation as Rust API)
         if bandwidth <= 0.0 || bandwidth > 1.0 {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "bandwidth must be in range (0.0, 1.0]",
-            ));
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("bandwidth must be in range (0.0, 1.0]"));
         }
         if center_freq < -0.5 || center_freq > 0.5 {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
@@ -221,26 +198,14 @@ impl PythonCarrier {
             ));
         }
         if rolloff < 0.0 || rolloff > 1.0 {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "rolloff must be in range [0.0, 1.0]",
-            ));
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("rolloff must be in range [0.0, 1.0]"));
         }
         if sample_rate_hz <= 0.0 {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "sample_rate_hz must be positive",
-            ));
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("sample_rate_hz must be positive"));
         }
 
         Ok(PythonCarrier {
-            inner: Carrier::new(
-                mod_type,
-                bandwidth,
-                center_freq,
-                snr_db,
-                rolloff,
-                sample_rate_hz,
-                seed,
-            ),
+            inner: Carrier::new(mod_type, bandwidth, center_freq, snr_db, rolloff, sample_rate_hz, seed),
         })
     }
 
@@ -255,9 +220,7 @@ impl PythonCarrier {
         let samples = self.inner.generate::<f64>(num_samples);
 
         // Convert ComplexVec to Vec<Complex<f64>>
-        let vec: Vec<Complex<f64>> = (0..samples.len())
-            .map(|i| samples[i])
-            .collect();
+        let vec: Vec<Complex<f64>> = (0..samples.len()).map(|i| samples[i]).collect();
 
         // Transfer ownership to Python
         let array = vec.into_pyarray_bound(py);
@@ -277,9 +240,7 @@ impl PythonCarrier {
         let samples = self.inner.generate_clean::<f64>(num_samples);
 
         // Convert ComplexVec to Vec<Complex<f64>>
-        let vec: Vec<Complex<f64>> = (0..samples.len())
-            .map(|i| samples[i])
-            .collect();
+        let vec: Vec<Complex<f64>> = (0..samples.len()).map(|i| samples[i]).collect();
 
         // Transfer ownership to Python
         let array = vec.into_pyarray_bound(py);
@@ -308,15 +269,10 @@ pub struct PythonChannel {
 impl PythonChannel {
     #[new]
     fn new(carriers: Vec<PyRef<PythonCarrier>>) -> PyResult<Self> {
-        let rust_carriers: Vec<Carrier> = carriers
-            .into_iter()
-            .map(|c| c.inner.clone())
-            .collect();
+        let rust_carriers: Vec<Carrier> = carriers.into_iter().map(|c| c.inner.clone()).collect();
 
         if rust_carriers.is_empty() {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Channel must have at least one carrier",
-            ));
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Channel must have at least one carrier"));
         }
 
         Ok(PythonChannel {
@@ -338,9 +294,7 @@ impl PythonChannel {
     ///     noise_floor_linear (float): Noise floor as a linear power value
     fn set_noise_floor_linear(&mut self, noise_floor_linear: f64) -> PyResult<()> {
         if noise_floor_linear <= 0.0 {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "noise_floor_linear must be positive",
-            ));
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("noise_floor_linear must be positive"));
         }
         self.inner.set_noise_floor_linear(noise_floor_linear);
         Ok(())
@@ -365,9 +319,7 @@ impl PythonChannel {
         let samples = self.inner.generate::<f64>(num_samples);
 
         // Convert ComplexVec to Vec<Complex<f64>>
-        let vec: Vec<Complex<f64>> = (0..samples.len())
-            .map(|i| samples[i])
-            .collect();
+        let vec: Vec<Complex<f64>> = (0..samples.len()).map(|i| samples[i]).collect();
 
         // Transfer ownership to Python
         let array = vec.into_pyarray_bound(py);
@@ -387,9 +339,7 @@ impl PythonChannel {
         let samples = self.inner.generate_clean::<f64>(num_samples);
 
         // Convert ComplexVec to Vec<Complex<f64>>
-        let vec: Vec<Complex<f64>> = (0..samples.len())
-            .map(|i| samples[i])
-            .collect();
+        let vec: Vec<Complex<f64>> = (0..samples.len()).map(|i| samples[i]).collect();
 
         // Transfer ownership to Python
         let array = vec.into_pyarray_bound(py);
@@ -429,6 +379,82 @@ impl PythonChannel {
     }
 }
 
+/// Python wrapper for the streaming cubic-Lagrange Farrow resampler.
+///
+/// Maintains a 4-sample delay line and fractional phase across `process()`
+/// calls so the same input split into blocks of any size yields the same
+/// output as feeding it in one call.
+///
+/// Parameters:
+///     input_rate_hz (float): Input sample rate in Hz (must be finite and positive).
+///     output_rate_hz (float): Output sample rate in Hz (must be finite and positive).
+///
+/// Example:
+///     >>> import signal_kit, numpy as np
+///     >>> resampler = signal_kit.FarrowResampler(1e6, 1.5e6)
+///     >>> iq_out = resampler.process(np.ones(1024, dtype=np.complex128))
+#[pyclass(name = "FarrowResampler")]
+pub struct PythonFarrowResampler {
+    inner: FarrowResampler<f64>,
+}
+
+#[pymethods]
+impl PythonFarrowResampler {
+    #[new]
+    fn new(input_rate_hz: f64, output_rate_hz: f64) -> PyResult<Self> {
+        validate_farrow_rates(input_rate_hz, output_rate_hz)?;
+        Ok(PythonFarrowResampler {
+            inner: FarrowResampler::cubic_lagrange(input_rate_hz, output_rate_hz),
+        })
+    }
+
+    /// Clear the delay line and fractional phase. Resampling ratio is preserved.
+    fn reset(&mut self) {
+        self.inner.reset();
+    }
+
+    /// Resample a complex128 block, advancing the streaming state.
+    ///
+    /// Parameters:
+    ///     input (numpy.ndarray): Complex-valued (complex128) input samples.
+    ///
+    /// Returns:
+    ///     numpy.ndarray: Complex-valued output samples whose length is
+    ///         approximately `len(input) * output_rate_hz / input_rate_hz`.
+    fn process(&mut self, py: Python, input: PyReadonlyArray1<Complex<f64>>) -> Py<PyArray1<Complex<f64>>> {
+        let input_vec: Vec<Complex<f64>> = input.as_array().to_vec();
+        let output = self.inner.process_block(&input_vec);
+        output.into_pyarray_bound(py).into()
+    }
+}
+
+/// Validate Farrow rates before constructing the panicking Rust resampler.
+fn validate_farrow_rates(input_rate_hz: f64, output_rate_hz: f64) -> PyResult<()> {
+    validate_farrow_rate("input_rate_hz", input_rate_hz)?;
+    validate_farrow_rate("output_rate_hz", output_rate_hz)?;
+
+    let step = input_rate_hz / output_rate_hz;
+    if !step.is_finite() || step <= 0.0 {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "resampling step must be finite and positive",
+        ));
+    }
+
+    Ok(())
+}
+
+/// Validate one Farrow sample rate for finite forward progress.
+fn validate_farrow_rate(name: &str, rate_hz: f64) -> PyResult<()> {
+    if !rate_hz.is_finite() || rate_hz <= 0.0 {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "{} must be finite and positive",
+            name
+        )));
+    }
+
+    Ok(())
+}
+
 /// Helper function to parse window type from string
 fn parse_window_type(window_str: &str) -> PyResult<WindowType> {
     match window_str.to_lowercase().as_str() {
@@ -436,22 +462,15 @@ fn parse_window_type(window_str: &str) -> PyResult<WindowType> {
         "hamming" => Ok(WindowType::Hamming),
         "blackman" => Ok(WindowType::Blackman),
         "rectangular" | "rect" => Ok(WindowType::Rectangular),
-        _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            format!(
-                "Unknown window type: '{}'. Supported types: hann, hamming, blackman, rectangular",
-                window_str
-            ),
-        )),
+        _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "Unknown window type: '{}'. Supported types: hann, hamming, blackman, rectangular",
+            window_str
+        ))),
     }
 }
 
 /// Validate Welch parameters before calling the Rust implementation.
-fn validate_welch_parameters(
-    sample_rate: f64,
-    nperseg: usize,
-    noverlap: Option<usize>,
-    nfft: Option<usize>,
-) -> PyResult<()> {
+fn validate_welch_parameters(sample_rate: f64, nperseg: usize, noverlap: Option<usize>, nfft: Option<usize>) -> PyResult<()> {
     validate_welch_nperseg(nperseg)?;
     validate_welch_sample_rate(sample_rate)?;
     validate_welch_overlap(nperseg, noverlap)?;
@@ -463,9 +482,7 @@ fn validate_welch_parameters(
 /// Validate that the Welch segment length can form segments.
 fn validate_welch_nperseg(nperseg: usize) -> PyResult<()> {
     if nperseg == 0 {
-        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "nperseg must be greater than 0",
-        ));
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("nperseg must be greater than 0"));
     }
 
     Ok(())
@@ -474,9 +491,7 @@ fn validate_welch_nperseg(nperseg: usize) -> PyResult<()> {
 /// Validate that the Welch sample rate is positive.
 fn validate_welch_sample_rate(sample_rate: f64) -> PyResult<()> {
     if sample_rate <= 0.0 {
-        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "sample_rate must be positive",
-        ));
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("sample_rate must be positive"));
     }
 
     Ok(())
@@ -485,9 +500,7 @@ fn validate_welch_sample_rate(sample_rate: f64) -> PyResult<()> {
 /// Validate that Welch overlap leaves forward progress between segments.
 fn validate_welch_overlap(nperseg: usize, noverlap: Option<usize>) -> PyResult<()> {
     if noverlap.unwrap_or(nperseg / 2) >= nperseg {
-        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "noverlap must be less than nperseg",
-        ));
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("noverlap must be less than nperseg"));
     }
 
     Ok(())
@@ -568,6 +581,7 @@ fn welch(
 fn _signal_kit(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PythonCarrier>()?;
     m.add_class::<PythonChannel>()?;
+    m.add_class::<PythonFarrowResampler>()?;
     m.add_function(wrap_pyfunction!(welch, m)?)?;
     m.add("__version__", "0.1.0")?;
 

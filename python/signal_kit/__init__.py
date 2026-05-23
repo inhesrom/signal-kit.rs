@@ -79,10 +79,10 @@ Supported Impairments:
     - {"type": "cosine_taper", "passband_end": X, "stopband_start": Y}
 """
 
-from ._signal_kit import Carrier, Channel, welch
+from ._signal_kit import Carrier, Channel, FarrowResampler, welch
 
 __version__ = "0.2.0"
-__all__ = ["Carrier", "Channel", "welch"]
+__all__ = ["Carrier", "Channel", "FarrowResampler", "welch"]
 
 
 def combine_carriers(*carrier_arrays):
