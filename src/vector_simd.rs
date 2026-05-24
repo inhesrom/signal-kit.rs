@@ -433,7 +433,7 @@ pub struct FrequencyShifter<T = f32> {
     radians_per_sample: T,
     phase: T,
     oscillator: Vec<Complex<T>>,
-    scratch: Vec<Complex<T>>,
+    input_buffer: Vec<Complex<T>>,
 }
 
 impl<T: IqSample> FrequencyShifter<T> {
@@ -444,7 +444,7 @@ impl<T: IqSample> FrequencyShifter<T> {
             radians_per_sample: T::from(std::f64::consts::TAU).unwrap() * freq_offset_hz / sample_rate_hz,
             phase: T::zero(),
             oscillator: Vec::new(),
-            scratch: Vec::new(),
+            input_buffer: Vec::new(),
         }
     }
 
@@ -459,9 +459,9 @@ impl<T: IqSample> FrequencyShifter<T> {
             return;
         }
         self.fill_oscillator(samples.len());
-        self.scratch.clear();
-        self.scratch.extend_from_slice(samples);
-        iq_multiply_to(&self.scratch, &self.oscillator, samples);
+        self.input_buffer.clear();
+        self.input_buffer.extend_from_slice(samples);
+        iq_multiply_to(&self.input_buffer, &self.oscillator, samples);
     }
 
     /// Fills the reusable oscillator buffer for one output block.
@@ -484,7 +484,7 @@ pub struct FirFilter<T = f32> {
     delay: Vec<Complex<T>>,
     reversed_taps: Vec<Complex<T>>,
     history: Vec<Complex<T>>,
-    input_scratch: Vec<Complex<T>>,
+    input_buffer: Vec<Complex<T>>,
 }
 
 impl<T: IqSample> FirFilter<T> {
@@ -498,7 +498,7 @@ impl<T: IqSample> FirFilter<T> {
             delay,
             reversed_taps,
             history: Vec::new(),
-            input_scratch: Vec::new(),
+            input_buffer: Vec::new(),
         }
     }
 
@@ -522,9 +522,9 @@ impl<T: IqSample> FirFilter<T> {
 
     /// Filters a block in place while preserving delay state.
     pub fn process_block_in_place(&mut self, samples: &mut [Complex<T>]) {
-        self.input_scratch.clear();
-        self.input_scratch.extend_from_slice(samples);
-        self.write_history_from_scratch();
+        self.input_buffer.clear();
+        self.input_buffer.extend_from_slice(samples);
+        self.write_history_from_input_buffer();
         self.write_block_output(samples);
         self.update_delay_from_history();
     }
@@ -561,11 +561,11 @@ impl<T: IqSample> FirFilter<T> {
         self.history.extend_from_slice(input);
     }
 
-    /// Builds chronological history from the reusable in-place scratch buffer.
-    fn write_history_from_scratch(&mut self) {
+    /// Builds chronological history from the reusable in-place input buffer.
+    fn write_history_from_input_buffer(&mut self) {
         self.history.clear();
         self.history.extend(self.delay.iter().rev().copied());
-        self.history.extend_from_slice(&self.input_scratch);
+        self.history.extend_from_slice(&self.input_buffer);
     }
 
     /// Writes the current history block through the SIMD convolution kernel.
