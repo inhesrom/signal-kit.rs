@@ -1,6 +1,7 @@
 fn main() {
     declare_simd_cfgs();
-    emit_selected_backend(select_backend());
+    let backend = select_backend();
+    emit_selected_backend(backend);
 }
 
 /// Declares the custom cfg names emitted by this build script.
@@ -16,6 +17,7 @@ fn declare_simd_cfgs() {
 fn emit_selected_backend(backend: SimdBackend) {
     println!("cargo:rustc-cfg={}", backend.cfg_name());
     println!("cargo:rustc-env=SIGNAL_KIT_SIMD_BACKEND={}", backend.name());
+    eprintln!("info: selected SignalKit SIMD backend: {}", backend.name());
 }
 
 /// Selects a backend for the Cargo target using build-host feature detection.
